@@ -991,6 +991,7 @@ EOF
     }
   ],
   "tlsSettings": {
+    "serverName": "${domain}",
     "alpn": [
       "h3"
     ],
@@ -1035,6 +1036,30 @@ EOF
 EOF
         else
             msg_inf "Existing inbounds detected ($inbound_count). Preserving users and keys."
+        fi
+
+        # Ensure any existing or newly created Hysteria 2 inbounds are bound to 0.0.0.0 and have externalProxy/serverName configured
+        if sqlite3 "$XUIDB" "SELECT 1 FROM inbounds WHERE protocol='hysteria' LIMIT 1;" 2>/dev/null | grep -q 1; then
+            python3 -c "
+import sqlite3, json, sys
+db, domain = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect(db)
+cursor = conn.cursor()
+cursor.execute(\"SELECT id, stream_settings FROM inbounds WHERE protocol='hysteria'\")
+rows = cursor.fetchall()
+for inbound_id, stream_settings_raw in rows:
+    try:
+        data = json.loads(stream_settings_raw) if stream_settings_raw else {}
+        data['externalProxy'] = [{'forceTls': 'tls', 'dest': domain, 'port': 443, 'remark': ''}]
+        if 'tlsSettings' not in data:
+            data['tlsSettings'] = {}
+        data['tlsSettings']['serverName'] = domain
+        cursor.execute(\"UPDATE inbounds SET listen='0.0.0.0', stream_settings=? WHERE id=?\", (json.dumps(data), inbound_id))
+    except Exception:
+        pass
+conn.commit()
+conn.close()
+" "$XUIDB" "$domain" 2>/dev/null || true
         fi
 /usr/local/x-ui/x-ui setting -username "${config_username}" -password "${config_password}" -port "${panel_port}" -webBasePath "${panel_path}"
 /usr/local/x-ui/x-ui cert -webCert "/root/cert/${domain}/fullchain.pem" -webCertKey "/root/cert/${domain}/privkey.pem"
