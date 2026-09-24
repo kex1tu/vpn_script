@@ -485,8 +485,23 @@ if [[ ${AUTODOMAIN} == *"y"* ]]; then
 fi
 
 
+resolve_cert_path() {
+    if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
+        return 0
+    fi
+    local alt_dir
+    alt_dir=$(ls -d /etc/letsencrypt/live/${domain}-*/ 2>/dev/null | sort -V | tail -n 1)
+    if [[ -n "$alt_dir" && -f "${alt_dir}fullchain.pem" ]]; then
+        mkdir -p "/etc/letsencrypt/live/${domain}"
+        ln -sf "${alt_dir}fullchain.pem" "/etc/letsencrypt/live/${domain}/fullchain.pem"
+        ln -sf "${alt_dir}privkey.pem" "/etc/letsencrypt/live/${domain}/privkey.pem"
+        return 0
+    fi
+    return 1
+}
+
 mkdir -p /var/www/html
-if [[ ! -d "/etc/letsencrypt/live/${domain}/" ]]; then
+if ! resolve_cert_path; then
     if ! dns_preflight_check "$domain"; then
         if [[ -t 0 ]]; then
             read -rp "DNS check failed. Continue requesting SSL certificate anyway? [y/N]: " continue_ssl || true
@@ -499,11 +514,12 @@ if [[ ! -d "/etc/letsencrypt/live/${domain}/" ]]; then
         fi
     fi
 
-    certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email -d "$domain" || \
-    certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos --register-unsafely-without-email -d "$domain" || true
+    certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name "$domain" --keep-until-expiring -d "$domain" || \
+    certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos --register-unsafely-without-email --cert-name "$domain" --keep-until-expiring -d "$domain" || true
+    resolve_cert_path || true
 fi
 
-if [[ ! -d "/etc/letsencrypt/live/${domain}/" ]]; then
+if [[ ! -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
  	systemctl start nginx >/dev/null 2>&1 || true
 	msg_err "$domain SSL could not be generated! Check Domain/IP Or Enter new domain!" && exit 1
 fi
