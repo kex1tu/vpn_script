@@ -1,0 +1,249 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 480" width="100%" height="100%">
+  <title>3X-UI Architecture and Multi-Layer Packet Routing</title>
+  <desc>Detailed end-to-end packet flow from WAN ingress through Nginx Stream SNI-preread, RAM Unix domain socket, Xray-core inbounds, and RU-Block outbound filtering.</desc>
+  
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="archBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070b14" />
+      <stop offset="100%" stop-color="#0c1322" />
+    </linearGradient>
+
+    <!-- Glowing Accents -->
+    <radialGradient id="archGlowCyan" cx="50%" cy="30%" r="50%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.12" />
+      <stop offset="100%" stop-color="#070b14" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Zone Gradients -->
+    <linearGradient id="zoneUFW" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#0f172a" stop-opacity="0.9" />
+    </linearGradient>
+
+    <linearGradient id="zoneNginx" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#022c22" stop-opacity="0.85" />
+      <stop offset="100%" stop-color="#064e3b" stop-opacity="0.6" />
+    </linearGradient>
+
+    <linearGradient id="zoneXray" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b" stop-opacity="0.85" />
+      <stop offset="100%" stop-color="#312e81" stop-opacity="0.6" />
+    </linearGradient>
+
+    <!-- Grid Pattern -->
+    <pattern id="archGrid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <path d="M 30 0 L 0 0 0 30" fill="none" stroke="#1e293b" stroke-width="0.5" stroke-opacity="0.4" />
+    </pattern>
+
+    <!-- Arrow Marker -->
+    <marker id="arrowCyan" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 1 1 L 7 4 L 1 7 Z" fill="#38bdf8" />
+    </marker>
+    <marker id="arrowGreen" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 1 1 L 7 4 L 1 7 Z" fill="#10b981" />
+    </marker>
+    <marker id="arrowPurple" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 1 1 L 7 4 L 1 7 Z" fill="#c084fc" />
+    </marker>
+    <marker id="arrowRed" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 1 1 L 7 4 L 1 7 Z" fill="#ef4444" />
+    </marker>
+  </defs>
+
+  <!-- Background Canvas -->
+  <rect width="1200" height="480" rx="16" fill="url(#archBg)" />
+  <rect width="1200" height="480" rx="16" fill="url(#archGrid)" />
+  <rect width="1200" height="480" rx="16" fill="url(#archGlowCyan)" />
+  <rect width="1200" height="480" rx="16" fill="none" stroke="#1e293b" stroke-width="1.5" />
+
+  <!-- Diagram Title Header -->
+  <g transform="translate(48, 36)">
+    <text x="0" y="0" fill="#38bdf8" font-family="monospace" font-size="12" font-weight="bold" letter-spacing="1.5">PACKET FLOW PIPELINE</text>
+    <text x="0" y="24" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="22" font-weight="800">End-to-End Stealthed L4/L7 Network Routing</text>
+    <text x="0" y="44" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13">Мультиплексирование TCP/UDP портов, RAM сокеты, строгая изоляция 127.0.0.1 и фильтрация RU-Block</text>
+  </g>
+
+  <!-- ==================== STAGE 1: INGRESS CLIENTS ==================== -->
+  <g transform="translate(48, 120)">
+    <!-- Stage Box -->
+    <rect width="150" height="310" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1" />
+    <rect width="150" height="28" rx="8" fill="#1e293b" />
+    <text x="14" y="19" fill="#94a3b8" font-family="monospace" font-size="11" font-weight="bold">1. WAN INGRESS</text>
+
+    <!-- Client TCP -->
+    <g transform="translate(12, 44)">
+      <rect width="126" height="60" rx="6" fill="#1e293b" stroke="#38bdf8" stroke-width="1" />
+      <text x="10" y="22" fill="#38bdf8" font-family="monospace" font-size="11" font-weight="bold">HTTPS Client</text>
+      <text x="10" y="38" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">TCP :443</text>
+      <text x="10" y="52" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">SNI: domain.tld</text>
+    </g>
+
+    <!-- Client UDP Hysteria 2 -->
+    <g transform="translate(12, 120)">
+      <rect width="126" height="60" rx="6" fill="#1e293b" stroke="#c084fc" stroke-width="1" />
+      <text x="10" y="22" fill="#c084fc" font-family="monospace" font-size="11" font-weight="bold">Hysteria 2</text>
+      <text x="10" y="38" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">UDP :443 (QUIC)</text>
+      <text x="10" y="52" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">ALPN: h3 / 0-RTT</text>
+    </g>
+
+    <!-- Scanners / Botnets -->
+    <g transform="translate(12, 196)">
+      <rect width="126" height="60" rx="6" fill="#2d1515" stroke="#ef4444" stroke-width="1" />
+      <text x="10" y="22" fill="#f87171" font-family="monospace" font-size="11" font-weight="bold">DPI / Scanner</text>
+      <text x="10" y="38" fill="#fca5a5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Direct IP Probe</text>
+      <text x="10" y="52" fill="#f87171" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">Fake/Missing SNI</text>
+    </g>
+
+    <text x="16" y="288" fill="#64748b" font-family="monospace" font-size="10">UFW: Default Deny</text>
+  </g>
+
+  <!-- Ingress Arrows -->
+  <path d="M 198 194 L 244 194" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrowCyan)" />
+  <path d="M 198 270 L 684 270" fill="none" stroke="#c084fc" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#arrowPurple)" />
+  <path d="M 198 346 L 244 346" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="3 3" marker-end="url(#arrowRed)" />
+
+  <!-- ==================== STAGE 2: NGINX STREAM L4 ==================== -->
+  <g transform="translate(244, 120)">
+    <rect width="190" height="310" rx="10" fill="#0b1727" stroke="#0284c7" stroke-width="1.2" />
+    <rect width="190" height="28" rx="8" fill="#0369a1" fill-opacity="0.3" />
+    <text x="14" y="19" fill="#38bdf8" font-family="monospace" font-size="11" font-weight="bold">2. NGINX STREAM L4</text>
+
+    <g transform="translate(14, 44)">
+      <rect width="162" height="110" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+      <text x="10" y="22" fill="#38bdf8" font-family="monospace" font-size="11" font-weight="bold">ssl_preread on</text>
+      <text x="10" y="40" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">SNI Inspection</text>
+      <text x="10" y="58" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">proxy_protocol on</text>
+      <text x="10" y="78" fill="#10b981" font-family="monospace" font-size="11">→ unix domain sock</text>
+      <text x="10" y="96" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">Zero-copy RAM pipe</text>
+    </g>
+
+    <g transform="translate(14, 168)">
+      <rect width="162" height="118" rx="8" fill="#1c1917" stroke="#44403c" stroke-width="1" />
+      <text x="10" y="22" fill="#fb923c" font-family="monospace" font-size="11" font-weight="bold">Anti-Loop Fallback</text>
+      <text x="10" y="40" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Port: 9443 (Localhost)</text>
+      <text x="10" y="58" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">Xray Reality / Steal-Self</text>
+      <text x="10" y="78" fill="#fb923c" font-family="monospace" font-size="10">upstream reality_failover</text>
+      <text x="10" y="96" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">Auto mask site backup</text>
+    </g>
+  </g>
+
+  <!-- Socket Pipe Arrow -->
+  <path d="M 434 194 L 484 194" fill="none" stroke="#10b981" stroke-width="2.5" marker-end="url(#arrowGreen)" />
+  <text x="440" y="184" fill="#34d399" font-family="monospace" font-size="9" font-weight="bold">/dev/shm</text>
+
+  <!-- ==================== STAGE 3: NGINX L7 HTTP/2 SSL VHOST ==================== -->
+  <g transform="translate(484, 120)">
+    <rect width="180" height="310" rx="10" fill="#06221c" stroke="#059669" stroke-width="1.2" />
+    <rect width="180" height="28" rx="8" fill="#047857" fill-opacity="0.3" />
+    <text x="14" y="19" fill="#34d399" font-family="monospace" font-size="11" font-weight="bold">3. NGINX HTTPS L7</text>
+
+    <!-- TLS Termination -->
+    <g transform="translate(12, 44)">
+      <rect width="156" height="52" rx="6" fill="#064e3b" stroke="#10b981" stroke-width="1" />
+      <text x="10" y="20" fill="#a7f3d0" font-family="monospace" font-size="10" font-weight="bold">TLS 1.2 / 1.3 Let's Encrypt</text>
+      <text x="10" y="34" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Strict SNI Check</text>
+      <text x="10" y="46" fill="#6ee7b7" font-family="monospace" font-size="9">ssl_reject_handshake</text>
+    </g>
+
+    <!-- Path Router -->
+    <g transform="translate(12, 104)">
+      <rect width="156" height="184" rx="6" fill="#022c22" stroke="#065f46" stroke-width="1" />
+      <text x="10" y="20" fill="#6ee7b7" font-family="monospace" font-size="10" font-weight="bold">LOCATION ROUTING</text>
+      
+      <!-- Branch A: xHTTP -->
+      <text x="10" y="40" fill="#38bdf8" font-family="monospace" font-size="10">/videos/media/ts/..</text>
+      <text x="10" y="54" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9">POST Stream (Zero-Log)</text>
+
+      <!-- Branch B: Panel Admin -->
+      <text x="10" y="78" fill="#a855f7" font-family="monospace" font-size="10">/${panel_path}/</text>
+      <text x="10" y="92" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9">WebSocket / ProxyPass</text>
+
+      <!-- Branch C: Fake Site -->
+      <text x="10" y="116" fill="#cbd5e1" font-family="monospace" font-size="10">GET / (Root/Other)</text>
+      <text x="10" y="130" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9">/var/www/html (Fake)</text>
+
+      <!-- Branch D: Exploit Hack -->
+      <text x="10" y="154" fill="#ef4444" font-family="monospace" font-size="10">Malicious URI (.. //)</text>
+      <text x="10" y="168" fill="#f87171" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9">TCP RST (HTTP 444)</text>
+    </g>
+  </g>
+
+  <!-- Routing Arrows to Local Backends -->
+  <path d="M 664 164 L 714 164" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrowCyan)" />
+  <path d="M 664 204 L 714 204" fill="none" stroke="#a855f7" stroke-width="2" marker-end="url(#arrowPurple)" />
+  <path d="M 664 274 L 714 340" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="3 3" marker-end="url(#arrowRed)" />
+
+  <!-- ==================== STAGE 4: BACKENDS (127.0.0.1 LOOPBACK) ==================== -->
+  <g transform="translate(714, 120)">
+    <rect width="210" height="310" rx="10" fill="#111827" stroke="#4f46e5" stroke-width="1.2" />
+    <rect width="210" height="28" rx="8" fill="#4338ca" fill-opacity="0.3" />
+    <text x="14" y="19" fill="#818cf8" font-family="monospace" font-size="11" font-weight="bold">4. LOOPBACK 127.0.0.1</text>
+
+    <!-- Xray xHTTP Inbound -->
+    <g transform="translate(12, 38)">
+      <rect width="186" height="58" rx="6" fill="#1e1b4b" stroke="#6366f1" stroke-width="1" />
+      <text x="10" y="18" fill="#a5b4fc" font-family="monospace" font-size="10" font-weight="bold">XRAY VLESS xHTTP</text>
+      <text x="10" y="34" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">h2c Cleartext :xhttp_port</text>
+      <text x="10" y="48" fill="#c7d2fe" font-family="monospace" font-size="9">vlessenc + X-Amz Tokens</text>
+    </g>
+
+    <!-- 3X-UI Admin Panel -->
+    <g transform="translate(12, 102)">
+      <rect width="186" height="54" rx="6" fill="#2e1065" stroke="#9333ea" stroke-width="1" />
+      <text x="10" y="18" fill="#e9d5ff" font-family="monospace" font-size="10" font-weight="bold">3X-UI WEB PANEL</text>
+      <text x="10" y="34" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">webListen: 127.0.0.1:port</text>
+      <text x="10" y="46" fill="#d8b4fe" font-family="monospace" font-size="9">chmod 600 x-ui.db</text>
+    </g>
+
+    <!-- Hysteria 2 UDP Inbound -->
+    <g transform="translate(12, 162)">
+      <rect width="186" height="54" rx="6" fill="#1e1b4b" stroke="#8b5cf6" stroke-width="1" />
+      <text x="10" y="18" fill="#c4b5fd" font-family="monospace" font-size="10" font-weight="bold">XRAY HYSTERIA 2</text>
+      <text x="10" y="34" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">QUIC UDP 443 (ALPN h3)</text>
+      <text x="10" y="46" fill="#ddd6fe" font-family="monospace" font-size="9">masquerade -> :80</text>
+    </g>
+
+    <!-- Active Defense Jail -->
+    <g transform="translate(12, 222)">
+      <rect width="186" height="74" rx="6" fill="#2d1515" stroke="#dc2626" stroke-width="1" />
+      <text x="10" y="18" fill="#fca5a5" font-family="monospace" font-size="10" font-weight="bold">FAIL2BAN IDS</text>
+      <text x="10" y="34" fill="#fecaca" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Jail [nginx-probe] (5/60s)</text>
+      <text x="10" y="48" fill="#fecaca" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Jail [sshd] (3/600s)</text>
+      <text x="10" y="64" fill="#ef4444" font-family="monospace" font-size="9">Action: UFW 24h Ban</text>
+    </g>
+  </g>
+
+  <!-- Filter Arrow -->
+  <path d="M 924 164 L 974 164" fill="none" stroke="#10b981" stroke-width="2" marker-end="url(#arrowGreen)" />
+  <path d="M 924 190 L 974 190" fill="none" stroke="#10b981" stroke-width="2" marker-end="url(#arrowGreen)" />
+
+  <!-- ==================== STAGE 5: OUTBOUND FILTERING (RU-BLOCK) ==================== -->
+  <g transform="translate(974, 120)">
+    <rect width="178" height="310" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.2" />
+    <rect width="178" height="28" rx="8" fill="#1e293b" />
+    <text x="14" y="19" fill="#10b981" font-family="monospace" font-size="11" font-weight="bold">5. RU-BLOCK FILTER</text>
+
+    <!-- Direct Global Internet -->
+    <g transform="translate(12, 44)">
+      <rect width="154" height="110" rx="8" fill="#064e3b" stroke="#10b981" stroke-width="1.2" />
+      <text x="10" y="22" fill="#a7f3d0" font-family="monospace" font-size="11" font-weight="bold">GLOBAL INTERNET</text>
+      <text x="10" y="40" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="bold">Outbound: DIRECT</text>
+      <text x="10" y="58" fill="#d1fae5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">TCP BBR Congestion</text>
+      <text x="10" y="74" fill="#d1fae5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">TCP Fast Open (3)</text>
+      <text x="10" y="92" fill="#6ee7b7" font-family="monospace" font-size="10">Free &amp; Uncensored</text>
+    </g>
+
+    <!-- Blocked Blackhole -->
+    <g transform="translate(12, 168)">
+      <rect width="154" height="126" rx="8" fill="#3f1313" stroke="#ef4444" stroke-width="1.2" />
+      <text x="10" y="22" fill="#fca5a5" font-family="monospace" font-size="11" font-weight="bold">BLOCKED / BLACKHOLE</text>
+      <text x="10" y="40" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">RU Resources Anti-Leak</text>
+      <text x="10" y="58" fill="#fecaca" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">• geosite_RU.dat</text>
+      <text x="10" y="72" fill="#fecaca" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">• geoip:ru / private</text>
+      <text x="10" y="86" fill="#fecaca" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">• BitTorrent Kill</text>
+      <text x="10" y="100" fill="#fecaca" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">• Outbound UDP:443</text>
+      <text x="10" y="116" fill="#ef4444" font-family="monospace" font-size="9">Prevents Deanonymization</text>
+    </g>
+  </g>
+</svg>

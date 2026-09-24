@@ -1,0 +1,14 @@
+# Agent workspace & local logs
+.agents/
+*.log
+
+# Backups and temporaries
+*.bak
+*.bak_*
+*.tmp
+*.swp
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db

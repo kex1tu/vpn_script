@@ -1,0 +1,189 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" width="100%" height="100%">
+  <title>3X-UI Enterprise Stealthed Infrastructure Suite</title>
+  <desc>Dual-stack VLESS-xHTTP and Hysteria 2 deployment with Nginx Stream SNI-preread, RAM Unix domain sockets, and Zero-Log protection.</desc>
+  
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#080c14" />
+      <stop offset="50%" stop-color="#0d1527" />
+      <stop offset="100%" stop-color="#050811" />
+    </linearGradient>
+
+    <radialGradient id="cyanGlow" cx="75%" cy="35%" r="60%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.18" />
+      <stop offset="50%" stop-color="#0284c7" stop-opacity="0.05" />
+      <stop offset="100%" stop-color="#080c14" stop-opacity="0" />
+    </radialGradient>
+
+    <radialGradient id="emeraldGlow" cx="20%" cy="80%" r="50%">
+      <stop offset="0%" stop-color="#10b981" stop-opacity="0.12" />
+      <stop offset="100%" stop-color="#080c14" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Card Backgrounds -->
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#151e32" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#0d1525" stop-opacity="0.95" />
+    </linearGradient>
+
+    <linearGradient id="cyanLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#818cf8" />
+      <stop offset="100%" stop-color="#34d399" />
+    </linearGradient>
+
+    <!-- Grid Pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.75" stroke-opacity="0.5" />
+    </pattern>
+  </defs>
+
+  <!-- Base Canvas -->
+  <rect width="1200" height="420" rx="16" fill="url(#bgGradient)" />
+  <rect width="1200" height="420" rx="16" fill="url(#grid)" />
+  <rect width="1200" height="420" rx="16" fill="url(#cyanGlow)" />
+  <rect width="1200" height="420" rx="16" fill="url(#emeraldGlow)" />
+  <rect width="1200" height="420" rx="16" fill="none" stroke="#1e293b" stroke-width="1.5" />
+
+  <!-- ==================== LEFT COLUMN: BRAND & VALUE ==================== -->
+  <g transform="translate(60, 48)">
+    <!-- Eyebrow Status Badge -->
+    <g transform="translate(0, 0)">
+      <rect width="320" height="30" rx="15" fill="#0f172a" stroke="#334155" stroke-width="1" />
+      <circle cx="16" cy="15" r="5" fill="#10b981" />
+      <circle cx="16" cy="15" r="8" fill="#10b981" fill-opacity="0.25" />
+      <text x="32" y="20" fill="#38bdf8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="700" letter-spacing="1">STEALTH ARCHITECTURE v2.9.4+</text>
+    </g>
+
+    <!-- Project Title -->
+    <text x="0" y="82" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="44" font-weight="800" letter-spacing="-0.5">3X-UI VPN Suite</text>
+    <text x="0" y="118" fill="#38bdf8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="20" font-weight="600">Enterprise Stealthed Obfuscation Infrastructure</text>
+
+    <!-- Value Proposition Sentence -->
+    <text x="0" y="156" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="15" font-weight="400">
+      <tspan x="0" dy="0">Единая точка входа на порту 443: Nginx Stream SNI + VLESS-xHTTP</tspan>
+      <tspan x="0" dy="24">параллельно с Hysteria 2 (UDP), полной изоляцией панели на 127.0.0.1</tspan>
+      <tspan x="0" dy="24">и интеллектуальной фильтрацией исходящего трафика RU-Block.</tspan>
+    </text>
+
+    <!-- Feature Chips Matrix -->
+    <g transform="translate(0, 238)">
+      <!-- Chip 1 -->
+      <g transform="translate(0, 0)">
+        <rect width="145" height="34" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+        <path d="M12 17 L16 21 L24 13" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        <text x="32" y="22" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600">L4 Stream SNI</text>
+      </g>
+      <!-- Chip 2 -->
+      <g transform="translate(155, 0)">
+        <rect width="155" height="34" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+        <path d="M12 17 L16 21 L24 13" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        <text x="32" y="22" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600">Hysteria 2 (UDP)</text>
+      </g>
+      <!-- Chip 3 -->
+      <g transform="translate(320, 0)">
+        <rect width="145" height="34" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+        <path d="M12 17 L16 21 L24 13" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        <text x="32" y="22" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600">RAM Unix Socket</text>
+      </g>
+
+      <!-- Row 2 -->
+      <!-- Chip 4 -->
+      <g transform="translate(0, 44)">
+        <rect width="145" height="34" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+        <path d="M12 17 L16 21 L24 13" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        <text x="32" y="22" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600">TCP BBR + TFO</text>
+      </g>
+      <!-- Chip 5 -->
+      <g transform="translate(155, 44)">
+        <rect width="155" height="34" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+        <path d="M12 17 L16 21 L24 13" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        <text x="32" y="22" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600">RU-Block Anti-Leak</text>
+      </g>
+      <!-- Chip 6 -->
+      <g transform="translate(320, 44)">
+        <rect width="145" height="34" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+        <path d="M12 17 L16 21 L24 13" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        <text x="32" y="22" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600">Docker QA 51/51</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== RIGHT COLUMN: ARCHITECTURE HUD CARD ==================== -->
+  <g transform="translate(580, 36)">
+    <!-- Terminal Box Container -->
+    <rect width="560" height="348" rx="12" fill="url(#cardGrad)" stroke="#334155" stroke-width="1" />
+    <rect width="560" height="3" rx="1.5" fill="url(#cyanLine)" />
+
+    <!-- Terminal Header Bar -->
+    <rect x="0" y="3" width="560" height="38" fill="#0b1120" rx="10" />
+    <circle cx="24" cy="22" r="5" fill="#ef4444" />
+    <circle cx="40" cy="22" r="5" fill="#f59e0b" />
+    <circle cx="56" cy="22" r="5" fill="#10b981" />
+    <text x="80" y="26" fill="#94a3b8" font-family="monospace" font-size="13">sni-router :: ingress-matrix:443</text>
+    <rect x="440" y="12" width="104" height="20" rx="4" fill="#1e293b" />
+    <text x="448" y="26" fill="#38bdf8" font-family="monospace" font-size="11" font-weight="bold">STATUS: SAFE</text>
+
+    <!-- Node 1: Ingress Point -->
+    <g transform="translate(24, 60)">
+      <rect width="150" height="52" rx="8" fill="#1e293b" stroke="#38bdf8" stroke-width="1.2" />
+      <text x="14" y="24" fill="#38bdf8" font-family="monospace" font-size="11" font-weight="bold">INGRESS :443</text>
+      <text x="14" y="42" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="600">TCP + UDP (WAN)</text>
+    </g>
+
+    <!-- Connection Line 1 -->
+    <path d="M174 86 L204 86" fill="none" stroke="#38bdf8" stroke-width="2" stroke-dasharray="4 2" />
+
+    <!-- Node 2: L4 Stream Demuxer -->
+    <g transform="translate(204, 52)">
+      <rect width="180" height="68" rx="8" fill="#0f172a" stroke="#818cf8" stroke-width="1.2" />
+      <text x="14" y="22" fill="#818cf8" font-family="monospace" font-size="11" font-weight="bold">NGINX STREAM L4</text>
+      <text x="14" y="40" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600">ssl_preread on</text>
+      <text x="14" y="58" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">SNI Inspection (Zero-Decrypt)</text>
+    </g>
+
+    <!-- Branching Lines -->
+    <path d="M384 86 L404 86 L404 68 L418 68" fill="none" stroke="#10b981" stroke-width="2" />
+    <path d="M384 86 L404 86 L404 116 L418 116" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="3 3" />
+
+    <!-- Node 3: Valid Target (Unix RAM Socket) -->
+    <g transform="translate(418, 48)">
+      <rect width="120" height="38" rx="6" fill="#064e3b" stroke="#10b981" stroke-width="1" />
+      <text x="10" y="18" fill="#a7f3d0" font-family="monospace" font-size="10" font-weight="bold">/dev/shm/sock</text>
+      <text x="10" y="32" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">VLESS xHTTP</text>
+    </g>
+
+    <!-- Node 4: Scanner Drop Target -->
+    <g transform="translate(418, 98)">
+      <rect width="120" height="36" rx="6" fill="#450a0a" stroke="#ef4444" stroke-width="1" />
+      <text x="10" y="16" fill="#fecaca" font-family="monospace" font-size="10" font-weight="bold">FAKE / RST 444</text>
+      <text x="10" y="30" fill="#fca5a5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Fail2ban 24h Ban</text>
+    </g>
+
+    <!-- Terminal Output Divider -->
+    <line x1="24" y1="150" x2="536" y2="150" stroke="#334155" stroke-width="1" />
+
+    <!-- Terminal Console Log Lines -->
+    <g transform="translate(24, 172)">
+      <text x="0" y="0" fill="#38bdf8" font-family="monospace" font-size="12">[✓] 127.0.0.1 Loopback Isolation:</text>
+      <text x="248" y="0" fill="#10b981" font-family="monospace" font-size="12">ENFORCED (No 0.0.0.0 bind)</text>
+
+      <text x="0" y="24" fill="#38bdf8" font-family="monospace" font-size="12">[✓] Hysteria 2 Protocol (UDP):</text>
+      <text x="248" y="24" fill="#10b981" font-family="monospace" font-size="12">ONLINE (ALPN h3 / TLS 1.3)</text>
+
+      <text x="0" y="48" fill="#38bdf8" font-family="monospace" font-size="12">[✓] RU-Block Outbound Filter:</text>
+      <text x="248" y="48" fill="#10b981" font-family="monospace" font-size="12">ACTIVE (geosite_RU, BT, QUIC)</text>
+
+      <text x="0" y="72" fill="#38bdf8" font-family="monospace" font-size="12">[✓] Linux Kernel Network Stack:</text>
+      <text x="248" y="72" fill="#10b981" font-family="monospace" font-size="12">TCP BBR + Fast Open = 3</text>
+
+      <text x="0" y="96" fill="#38bdf8" font-family="monospace" font-size="12">[✓] Docker QA Suite Verification:</text>
+      <text x="248" y="96" fill="#10b981" font-family="monospace" font-size="12" font-weight="bold">51 / 51 TESTS PASSED</text>
+    </g>
+
+    <!-- Interactive Cursor in Console -->
+    <rect x="24" y="294" width="8" height="15" fill="#38bdf8" fill-opacity="0.8" />
+    <text x="38" y="306" fill="#64748b" font-family="monospace" font-size="12">zero_log: active | drop_unmatched_sni: true</text>
+  </g>
+</svg>
