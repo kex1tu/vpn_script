@@ -617,10 +617,10 @@ echo "stream { include /etc/nginx/stream-enabled/*.conf; }" >> /etc/nginx/nginx.
 sed -i "/http2_recv_buffer_size/d" /etc/nginx/nginx.conf 2>/dev/null || true
 sed -i '/http {/a \    http2_recv_buffer_size 16m;' /etc/nginx/nginx.conf
 
+# Ensure conf.d/*.conf is loaded BEFORE sites-enabled/* (so probe_combined log format is defined first)
+sed -i "/conf\.d\/\*\.conf/d" /etc/nginx/nginx.conf 2>/dev/null || true
 sed -i "/sites-enabled/d" /etc/nginx/nginx.conf 2>/dev/null || true
-sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
-
-grep -q "conf\.d/\*\.conf;" /etc/nginx/nginx.conf 2>/dev/null || sed -i '/http {/a \    include /etc/nginx/conf.d/*.conf;' /etc/nginx/nginx.conf
+sed -i '/http {/a \    include /etc/nginx/conf.d/*.conf;\n    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
 
 # Prepare probe log file and directory with secure permissions
 mkdir -p /var/log/nginx
