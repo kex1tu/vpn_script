@@ -982,6 +982,14 @@ EOF
              '{
   "network": "hysteria",
   "security": "tls",
+  "externalProxy": [
+    {
+      "forceTls": "tls",
+      "dest": "${domain}",
+      "port": 443,
+      "remark": ""
+    }
+  ],
   "tlsSettings": {
     "alpn": [
       "h3"
