@@ -252,6 +252,7 @@ systemctl stop x-ui 2>/dev/null || true
 rm -rf /etc/systemd/system/x-ui.service
 rm -rf /usr/local/x-ui
 rm -rf /etc/x-ui
+mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/stream-enabled /etc/nginx/snippets /etc/nginx/conf.d
 rm -rf /etc/nginx/sites-enabled/*
 rm -rf /etc/nginx/sites-available/*
 rm -rf /etc/nginx/stream-enabled/*
@@ -540,7 +541,8 @@ rm -f /root/cert/${domain}/*
 ln -sf /etc/letsencrypt/live/${domain}/fullchain.pem /root/cert/${domain}/fullchain.pem
 ln -sf /etc/letsencrypt/live/${domain}/privkey.pem /root/cert/${domain}/privkey.pem
 
-mkdir -p /etc/nginx/stream-enabled
+mkdir -p /etc/nginx/stream-enabled /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/snippets /etc/nginx/conf.d
+rm -f /etc/nginx/conf.d/default.conf
 # Why: Public L4 stream router listens on both IPv4 and IPv6 (if available).
 # Internal upstream uses RAM unix socket (/dev/shm/nginx-http.sock), avoiding loopback TCP overhead.
 IPV6_STREAM=""
@@ -593,11 +595,16 @@ grep -xqFR "http2_recv_buffer_size 16m;" /etc/nginx/* || sed -i '/http {/a \    
 # Ensure conf.d/*.conf is included in http block
 grep -q "conf\.d/\*\.conf;" /etc/nginx/nginx.conf 2>/dev/null || sed -i '/http {/a \    include /etc/nginx/conf.d/*.conf;' /etc/nginx/nginx.conf
 
+# Ensure sites-enabled/* is included in http block (required for official nginx mainline packages)
+grep -q "sites-enabled" /etc/nginx/nginx.conf 2>/dev/null || sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
+
 # Prepare probe log file and directory with secure permissions
 mkdir -p /var/log/nginx
 touch /var/log/nginx/probe.log
 chmod 640 /var/log/nginx/probe.log
-chown www-data:adm /var/log/nginx/probe.log 2>/dev/null || true
+NGX_LOG_USER=$(awk '$1=="user" {gsub(";", "", $2); print $2; exit}' /etc/nginx/nginx.conf 2>/dev/null || echo "www-data")
+[[ -z "$NGX_LOG_USER" ]] && NGX_LOG_USER="www-data"
+chown "${NGX_LOG_USER}:adm" /var/log/nginx/probe.log 2>/dev/null || chown www-data:adm /var/log/nginx/probe.log 2>/dev/null || true
 
 # Nginx Rate Limiting and Attack Probe Logging
 mkdir -p /etc/nginx/conf.d
