@@ -598,21 +598,29 @@ server {
 
 EOF
 
-grep -xqFR "stream { include /etc/nginx/stream-enabled/*.conf; }" /etc/nginx/* ||echo "stream { include /etc/nginx/stream-enabled/*.conf; }" >> /etc/nginx/nginx.conf
 # Why: Load dynamic stream module only if module file exists and not already loaded/built-in
 if [[ -f /usr/lib/nginx/modules/ngx_stream_module.so ]] && ! grep -rq "ngx_stream_module" /etc/nginx/ 2>/dev/null; then
     sed -i '1s/^/load_module \/usr\/lib\/nginx\/modules\/ngx_stream_module.so; /' /etc/nginx/nginx.conf
 fi
-grep -xqFR "worker_rlimit_nofile 16384;" /etc/nginx/* ||echo "worker_rlimit_nofile 16384;" >> /etc/nginx/nginx.conf
-sed -i "/worker_connections/c\worker_connections 4096;" /etc/nginx/nginx.conf
-# Why: Enlarge H2 receive buffer at http level for high-throughput xHTTP streams
-grep -xqFR "http2_recv_buffer_size 16m;" /etc/nginx/* || sed -i '/http {/a \    http2_recv_buffer_size 16m;' /etc/nginx/nginx.conf
 
-# Ensure conf.d/*.conf is included in http block
+sed -i "/worker_connections/c\worker_connections 4096;" /etc/nginx/nginx.conf 2>/dev/null || true
+
+# Worker rlimit (idempotent)
+sed -i "/worker_rlimit_nofile/d" /etc/nginx/nginx.conf 2>/dev/null || true
+echo "worker_rlimit_nofile 16384;" >> /etc/nginx/nginx.conf
+
+# Stream block inclusion (idempotent)
+sed -i "/stream-enabled/d" /etc/nginx/nginx.conf 2>/dev/null || true
+echo "stream { include /etc/nginx/stream-enabled/*.conf; }" >> /etc/nginx/nginx.conf
+
+# HTTP block inclusions (idempotent)
+sed -i "/http2_recv_buffer_size/d" /etc/nginx/nginx.conf 2>/dev/null || true
+sed -i '/http {/a \    http2_recv_buffer_size 16m;' /etc/nginx/nginx.conf
+
+sed -i "/sites-enabled/d" /etc/nginx/nginx.conf 2>/dev/null || true
+sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
+
 grep -q "conf\.d/\*\.conf;" /etc/nginx/nginx.conf 2>/dev/null || sed -i '/http {/a \    include /etc/nginx/conf.d/*.conf;' /etc/nginx/nginx.conf
-
-# Ensure sites-enabled/* is included in http block (required for official nginx mainline packages)
-grep -q "sites-enabled" /etc/nginx/nginx.conf 2>/dev/null || sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
 
 # Prepare probe log file and directory with secure permissions
 mkdir -p /var/log/nginx
@@ -784,6 +792,9 @@ else
 fi
 
 if [[ $(nginx -t 2>&1 | grep -o 'successful') != "successful" ]]; then
+    echo "--- NGINX CONFIG ERROR DIAGNOSTIC ---" >&2
+    nginx -t >&2 || true
+    echo "--------------------------------------" >&2
     msg_err "nginx config is not ok!" && exit 1
 else
 	systemctl start nginx 2>/dev/null || service nginx start 2>/dev/null || true
