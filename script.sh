@@ -1675,7 +1675,7 @@ fi
 [[ "$emoji_flag" == "null" ]] && emoji_flag=""
 
 CLIENT_VLESS_URL="vless://${client_id}@${domain}:443?type=xhttp&security=tls&encryption=${vless_encryption}&flow=xtls-rprx-vision&path=%2Fvideos%2Fmedia%2Fts%2F1080%2F&mode=stream-one&sni=${domain}#${emoji_flag}%20${domain}%20(xHTTP)"
-CLIENT_HY2_URL="hysteria2://${client_id}@${domain}:443/?sni=${domain}&alpn=h3#${emoji_flag}%20${domain}%20(Hysteria2)"
+CLIENT_HY2_URL="hysteria2://${client_id}@${domain}:443?sni=${domain}&alpn=h3#${emoji_flag}%20${domain}%20(Hysteria2)"
 
 ##################################Show Details##########################################################
 
