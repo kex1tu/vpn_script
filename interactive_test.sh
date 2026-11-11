@@ -2,13 +2,15 @@
 # ==============================================================================
 # interactive_test.sh — Запуск реальной панели 3X-UI и Nginx в Docker для браузера
 # ==============================================================================
-set -e
+set -euo pipefail
 
 DOMAIN="test.example.com"
 PANEL_PORT="2096"
 PANEL_PATH="panel"
-ADMIN_USER="admin"
-ADMIN_PASS="admin"
+ADMIN_USER="demo-$(openssl rand -hex 4)"
+ADMIN_PASS="$(openssl rand -hex 16)"
+export XUI_DB_FOLDER
+XUI_DB_FOLDER=$(mktemp -d)
 
 # Цвета
 GREEN='\033[0;32m'
@@ -23,25 +25,25 @@ echo -e "${CYAN}================================================================
 echo -e "${CYAN}   Инициализация полного окружения 3X-UI + Nginx в Docker       ${NC}"
 echo -e "${CYAN}================================================================${NC}"
 
-# 1. Запуск тестового скрипта для создания базовой архитектуры
-echo -e "${BLUE}[*] Создание архитектуры Nginx (Stream SNI-preread, SSL)...${NC}"
-/test_script.sh > /dev/null 2>&1 || true
-
-# 2. Освобождаем внутренний порт 443 для подписок в SQLite3 (чтобы Nginx слушал 443)
-sqlite3 /etc/x-ui/x-ui.db "UPDATE settings SET value = '28506' WHERE key = 'subPort';" 2>/dev/null || true
-
-# 3. Настройка и запуск РЕАЛЬНОЙ панели 3X-UI
+# Настраиваем панель на отдельной базе, чтобы она не зависела от тестовых фикстур.
 echo -e "${BLUE}[*] Настройка параметров 3X-UI (порт ${PANEL_PORT}, путь /${PANEL_PATH}/)...${NC}"
-mkdir -p /etc/x-ui /var/log
-/usr/local/x-ui/x-ui setting -username "${ADMIN_USER}" -password "${ADMIN_PASS}" -port "${PANEL_PORT}" -webBasePath "/${PANEL_PATH}/" >/dev/null 2>&1 || true
+cd /usr/local/x-ui
+./x-ui migrate
+./x-ui setting -username "${ADMIN_USER}" -password "${ADMIN_PASS}" \
+    -port "${PANEL_PORT}" -webBasePath "/${PANEL_PATH}/" -listenIP 127.0.0.1 >/dev/null
+sqlite3 -bail "$XUI_DB_FOLDER/x-ui.db" << 'SQL'
+DELETE FROM settings WHERE key = 'subEnable';
+INSERT INTO settings (key, value) VALUES ('subEnable', 'false');
+SQL
 
 echo -e "${BLUE}[*] Запуск сервиса 3X-UI в фоне...${NC}"
-pkill -f "/usr/local/x-ui/x-ui run" 2>/dev/null || true
-/usr/local/x-ui/x-ui run > /var/log/x-ui.log 2>&1 &
-sleep 2
+./x-ui run > /var/log/x-ui.log 2>&1 &
+panel_pid=$!
+trap 'kill "$panel_pid" 2>/dev/null || true; rm -rf -- "$XUI_DB_FOLDER"' EXIT
 
-# 4. Настройка Nginx Stream SNI-preread для локального тестирования
+# Настройка Nginx Stream SNI-preread для локального тестирования
 echo -e "${BLUE}[*] Конфигурирование Nginx Stream SNI-preread...${NC}"
+printf '\nstream { include /etc/nginx/stream-enabled/*.conf; }\n' >> /etc/nginx/nginx.conf
 cat > "/etc/nginx/stream-enabled/stream.conf" << 'EOF'
 map $ssl_preread_server_name $sni_name {
     hostnames;
@@ -64,13 +66,18 @@ server {
 }
 EOF
 
-# 5. Настройка vhost Nginx со связкой с реальным 3X-UI
+# Настройка vhost Nginx со связкой с реальным 3X-UI
 cat > "/etc/nginx/sites-available/${DOMAIN}" << EOF
+server {
+	listen 80;
+	return 301 https://localhost:8443\$request_uri;
+}
+
 server {
 	server_tokens off;
 	server_name ${DOMAIN} localhost 127.0.0.1;
-	listen 7443 ssl http2 proxy_protocol;
-	listen [::]:7443 ssl http2 proxy_protocol;
+	listen 127.0.0.1:7443 ssl proxy_protocol;
+	http2 on;
 	root /var/www/html/;
 	index index.html;
 
@@ -113,6 +120,7 @@ server {
 	}
 }
 EOF
+ln -sf "/etc/nginx/sites-available/${DOMAIN}" "/etc/nginx/sites-enabled/${DOMAIN}"
 
 # 6. Создаем красивую интерактивную страницу сайта-заглушки (Fake Site)
 mkdir -p /var/www/html
@@ -140,8 +148,6 @@ cat > /var/www/html/index.html << 'EOF'
         <p>Этот сайт отдаётся Nginx как безопасная заглушка при стандартном заходе на порт 443.</p>
         <div class="info-box">
             <div>🔐 Панель: <a href="/panel/" style="color:#38bdf8;">/panel/</a></div>
-            <div>👤 Логин: admin</div>
-            <div>🔑 Пароль: admin</div>
         </div>
         <a class="btn" href="/panel/">Войти в реальную панель 3X-UI →</a>
     </div>
@@ -153,6 +159,26 @@ EOF
 echo -e "${BLUE}[*] Валидация и запуск Nginx...${NC}"
 nginx -t
 nginx
+
+check_https() {
+    local status
+    status=$(curl --silent --show-error --insecure --max-time 3 \
+        --resolve localhost:443:127.0.0.1 --output /dev/null --write-out '%{http_code}' \
+        "https://localhost$1") || return 1
+    [[ "$status" == 200 ]]
+}
+
+for attempt in {1..30}; do
+    if check_https "/${PANEL_PATH}/"; then
+        break
+    fi
+    if ! kill -0 "$panel_pid" 2>/dev/null || (( attempt == 30 )); then
+        echo "Панель не ответила HTTP 200." >&2
+        tail -n 25 /var/log/x-ui.log >&2
+        exit 1
+    fi
+    sleep 0.2
+done
 
 echo ""
 echo -e "${GREEN}${BOLD}================================================================${NC}"
@@ -183,18 +209,24 @@ while true; do
     echo -e "  ${GREEN}5${NC}) 💻 Открыть Bash-консоль внутри контейнера"
     echo -e "  ${RED}0${NC}) ❌ Остановить контейнер и выйти"
     echo -e "${CYAN}----------------------------------------------------------------${NC}"
-    read -p "Выберите действие [0-5]: " choice
+    read -r -p "Выберите действие [0-5]: " choice || exit 0
 
     case "$choice" in
         1)
             echo -e "\n${BLUE}>>> Запрос к сайту-заглушке:${NC}"
-            curl -k -s -i https://127.0.0.1:443/ | head -n 16
-            echo -e "${GREEN}✓ Ответ получен.${NC}\n"
+            if check_https /; then
+                echo -e "${GREEN}✓ Сайт отвечает HTTP 200.${NC}\n"
+            else
+                echo -e "${RED}Сайт не ответил HTTP 200.${NC}\n"
+            fi
             ;;
         2)
             echo -e "\n${BLUE}>>> Запрос к панели 3X-UI через Nginx:${NC}"
-            curl -k -s -i https://127.0.0.1:443/panel/ | head -n 20
-            echo -e "${GREEN}✓ Панель 3X-UI отвечает кодом 200 OK!${NC}\n"
+            if check_https "/${PANEL_PATH}/"; then
+                echo -e "${GREEN}✓ Панель 3X-UI отвечает HTTP 200.${NC}\n"
+            else
+                echo -e "${RED}Панель не ответила HTTP 200.${NC}\n"
+            fi
             ;;
         3)
             echo -e "\n${BLUE}>>> Логи 3X-UI:${NC}"
@@ -212,7 +244,6 @@ while true; do
             ;;
         0)
             echo -e "${GREEN}Остановка сервисов и выход.${NC}"
-            pkill -f "/usr/local/x-ui/x-ui run" 2>/dev/null || true
             nginx -s stop 2>/dev/null || true
             exit 0
             ;;

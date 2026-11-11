@@ -7,8 +7,6 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
-chmod +x interactive_test.sh test_script.sh script.sh 2>/dev/null || true
-
 echo "=========================================================="
 echo "  Сборка тестового Docker-образа (xui-test)..."
 echo "=========================================================="
@@ -17,11 +15,11 @@ docker build -f Dockerfile.test -t xui-test .
 echo ""
 echo "=========================================================="
 echo "  Запуск интерактивного контейнера..."
-echo "  Проброс портов: 8443->443 (HTTPS/SNI), 8080->80 (HTTP)"
+echo "  Проброс портов: 127.0.0.1:8443->443 (HTTPS), 127.0.0.1:8080->80 (HTTP)"
 echo "=========================================================="
 docker run -it --rm \
-    -p 8443:443 \
-    -p 8080:80 \
+    -p 127.0.0.1:8443:443 \
+    -p 127.0.0.1:8080:80 \
     --name xui-interactive \
     xui-test \
     /interactive_test.sh

@@ -83,8 +83,8 @@
     <text x="18" y="82" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="16" font-weight="700">DPI Defense &amp; Blackhole</text>
 
     <text x="18" y="110" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12">
-      <tspan x="18" dy="0">• Отдача реалистичного Fake Site</tspan>
-      <tspan x="18" dy="20">• Сброс зондов TCP RST (444)</tspan>
+      <tspan x="18" dy="0">• Проксирование сервиса маскировки</tspan>
+      <tspan x="18" dy="20">• Проверка TLS SNI</tspan>
       <tspan x="18" dy="20">• Блокировка геозон RU &amp; BitTorrent</tspan>
       <tspan x="18" dy="20">• Fail2ban джейлы с баном на 24ч</tspan>
     </text>
@@ -99,15 +99,15 @@
     <rect x="18" y="18" width="36" height="36" rx="8" fill="#312e81" fill-opacity="0.3" stroke="#818cf8" stroke-width="1" />
     <path d="M 38 24 L 28 35 L 35 35 L 34 46 L 44 34 L 37 34 Z" fill="none" stroke="#818cf8" stroke-width="1.8" stroke-linejoin="round" />
 
-    <text x="64" y="32" fill="#818cf8" font-family="monospace" font-size="11" font-weight="bold">KERNEL ACCELERATION</text>
-    <text x="64" y="47" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">BBR, TFO &amp; High-Limit</text>
+    <text x="64" y="32" fill="#818cf8" font-family="monospace" font-size="11" font-weight="bold">SERVICE LIMITS</text>
+    <text x="64" y="47" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Systemd &amp; Recovery</text>
 
-    <text x="18" y="82" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="16" font-weight="700">Linux TCP/UDP Tuning</text>
+    <text x="18" y="82" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="16" font-weight="700">Managed Installation</text>
 
     <text x="18" y="110" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12">
-      <tspan x="18" dy="0">• Алгоритм TCP BBR + очереди fq</tspan>
-      <tspan x="18" dy="20">• TCP Fast Open = 3 (0-RTT)</tspan>
-      <tspan x="18" dy="20">• Буферы UDP/QUIC до 16 МБ</tspan>
+      <tspan x="18" dy="0">• Согласованный снимок SQLite</tspan>
+      <tspan x="18" dy="20">• Откат при сбое установки</tspan>
+      <tspan x="18" dy="20">• Подтверждение переноса SSH</tspan>
       <tspan x="18" dy="20">• LimitNOFILE = 65535 дескрипторов</tspan>
     </text>
   </g>

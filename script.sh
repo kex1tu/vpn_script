@@ -17,249 +17,571 @@ msg_inf		 ' /\    |_| _|_   |   | \ \_/ '	; echo
 ##################################Variables#############################################################
 XUIDB="/etc/x-ui/x-ui.db"
 domain=""
-MASTER_IP=""
-UNINSTALL="x"
+UNINSTALL="n"
+DRY_RUN=n
+ADOPT_LEGACY=n
+ADOPT_TOKEN=""
+DNS_PROVIDER=""
+SSH_CONFIRM=n
+SSH_ROLLBACK=n
+PUBLIC_IP4=""
+PUBLIC_IP6=""
 INSTALL="y"
-PNLNUM=1
-CFALLOW="n"
 BLOCK_RU="y"
-MODE="master"
 AUTODOMAIN="n"
 # Why: Dedicated internal port for Xray Steal-Oneself fallback, preventing infinite loopback to 443
 ANTILOOP_PORT=9443
 # Hardened SSH port (default 60022 if configured or specified via -ssh_port)
 SSH_PORT=""
-release=""
-green='\e[1;32m'
-yellow='\e[1;33m'
-red='\e[1;31m'
-blue='\e[1;34m'
-plain='\e[0m'
+SSH_PORT_EXPLICIT=n
+MASK_UPSTREAM=""
+MASK_PORT=""
+XHTTP_CONFIG_PATH=""
+XHTTP_DOWNLOAD_PATH=""
+REALITY_TARGET=""
+REALITY_TARGET_EXPLICIT=n
 
-if command -v apt-get >/dev/null 2>&1; then
-    Pak="apt-get"
-elif command -v apt >/dev/null 2>&1; then
-    Pak="apt"
-elif command -v yum >/dev/null 2>&1; then
-    Pak="yum"
-else
-    echo "Unsupported package manager." >&2
-    exit 1
-fi
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+LIB_DIR="$SCRIPT_DIR/lib"
+if [[ "$SCRIPT_DIR" == /usr/local/sbin ]]; then LIB_DIR=/usr/local/lib/vpn-script; fi
+source "$LIB_DIR/deployment.sh"
+source "$LIB_DIR/versions.conf"
+source "$LIB_DIR/release.sh"
+source "$LIB_DIR/ssh.sh"
+source "$LIB_DIR/download.sh"
 
-################################Get arguments###########################################################
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -auto_domain) AUTODOMAIN="$2"; shift 2;;
-    -install) INSTALL="$2"; shift 2;;
-    -panel) PNLNUM="$2"; shift 2;;
-    -subdomain) domain="$2"; shift 2;;
-    -reality_domain) shift 2;; # deprecated, ignored
-    -ONLY_CF_IP_ALLOW) CFALLOW="$2"; shift 2;;
-    -uninstall) UNINSTALL="$2"; shift 2;;
-    -block_ru) BLOCK_RU="$2"; shift 2;;
-    -mode) MODE="$2"; shift 2;;
-    -master_ip) MASTER_IP="$2"; shift 2;;
-    -ssh_port) SSH_PORT="$2"; shift 2;;
-    *) shift 1;;
-  esac
+while (( $# > 0 )); do
+    if (( $# < 2 )); then deployment_error "Missing value for $1"; exit 1; fi
+    case "$1" in
+        -auto_domain) AUTODOMAIN=$2 ;;
+        -install) INSTALL=$2 ;;
+        -subdomain) domain=$2 ;;
+        -uninstall) UNINSTALL=$2 ;;
+        -block_ru) BLOCK_RU=$2 ;;
+        -ssh_port) SSH_PORT=$2; SSH_PORT_EXPLICIT=y ;;
+        -mask_upstream) MASK_UPSTREAM=$2 ;;
+        -mask_port) MASK_PORT=${2:?Missing mask port} ;;
+        -xhttp_config_path) XHTTP_CONFIG_PATH=${2:?Missing xHTTP file path} ;;
+        -xhttp_download_path) XHTTP_DOWNLOAD_PATH=${2:?Missing xHTTP download path} ;;
+        -reality_target) REALITY_TARGET=$2; REALITY_TARGET_EXPLICIT=y ;;
+        -dry_run) DRY_RUN=$2 ;;
+        -adopt_legacy) ADOPT_LEGACY=$2 ;;
+        -adopt_token) ADOPT_TOKEN=$2 ;;
+        -dns_provider) DNS_PROVIDER=$2 ;;
+        -ssh_confirm) SSH_CONFIRM=$2 ;;
+        -ssh_rollback) SSH_ROLLBACK=$2 ;;
+        -public_ip4) PUBLIC_IP4=$2 ;;
+        -public_ip6) PUBLIC_IP6=$2 ;;
+        *) deployment_error "Unknown option: $1"; exit 1 ;;
+    esac
+    shift 2
 done
 
-
-##############################Uninstall#################################################################
-UNINSTALL_XUI(){
-	systemctl stop x-ui nginx 2>/dev/null || true
-	systemctl disable x-ui nginx 2>/dev/null || true
-	printf 'y\n' | x-ui uninstall 2>/dev/null || true
-	rm -rf "/etc/x-ui/" "/usr/local/x-ui/" "/usr/bin/x-ui/" "/usr/bin/x-ui-temp"
-	rm -rf /etc/systemd/system/x-ui.service /etc/systemd/system/x-ui.service.d
-	rm -rf /etc/systemd/system/nginx.service.d
-	rm -f /dev/shm/xhttp.sock /dev/shm/nginx-http.sock
-	rm -f /etc/sysctl.d/99-xui-tuning.conf
-	rm -f /etc/logrotate.d/xui-nginx
-	rm -f /etc/fail2ban/jail.d/99-nginx-probe.local /etc/fail2ban/jail.d/99-sshd.local /etc/fail2ban/filter.d/nginx-probe.conf /var/log/nginx/probe.log
-	rm -f /etc/ssh/sshd_config.d/99-custom-port.conf
-	rm -f /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/50unattended-upgrades
-	systemctl restart fail2ban 2>/dev/null || true
-	systemctl reload-or-restart ssh 2>/dev/null || systemctl reload-or-restart sshd 2>/dev/null || true
-	rm -rf /etc/letsencrypt /root/cert
-	rm -f /etc/apt/sources.list.d/nginx-mainline.list /etc/apt/preferences.d/99-nginx-mainline /usr/share/keyrings/nginx-archive-keyring.gpg
-	crontab -l 2>/dev/null | grep -v "certbot\|x-ui\|nginx" | crontab -
-	sysctl --system 2>/dev/null || true
-	systemctl daemon-reload 2>/dev/null || true
-	$Pak -y remove nginx nginx-common nginx-core nginx-full libnginx-mod-stream python3-certbot-nginx certbot 2>/dev/null || true
-	$Pak -y purge nginx nginx-common nginx-core nginx-full libnginx-mod-stream python3-certbot-nginx certbot 2>/dev/null || true
-	$Pak -y autoremove 2>/dev/null || true
-	$Pak -y autoclean 2>/dev/null || true
-	rm -rf "/var/www/html/" "/etc/nginx/" "/usr/share/nginx/" "/var/log/nginx/"
-}
-if [[ ${UNINSTALL} == *"y"* ]]; then
-	UNINSTALL_XUI	
-	clear && msg_ok "Completely Uninstalled!" && exit 1
+for option in UNINSTALL INSTALL BLOCK_RU AUTODOMAIN DRY_RUN ADOPT_LEGACY SSH_CONFIRM SSH_ROLLBACK; do
+    if [[ "${!option}" != y && "${!option}" != n ]]; then
+        deployment_error "$option must be y or n"
+        exit 1
+    fi
+done
+if [[ "$SSH_CONFIRM" == y || "$SSH_ROLLBACK" == y ]]; then
+    if [[ "$DRY_RUN" == y || "$UNINSTALL" == y || ( "$SSH_CONFIRM" == y && "$SSH_ROLLBACK" == y ) ]]; then
+        deployment_error "SSH confirmation and rollback require a single explicit action"
+        exit 1
+    fi
+    deployment_lock
+    if [[ "$SSH_CONFIRM" == y ]]; then
+        ssh_migration_confirm
+    else
+        ssh_migration_rollback_expired
+    fi
+    exit
 fi
+case "$DNS_PROVIDER" in
+    ""|xboxdns|geohide|comss|none) ;;
+    *) deployment_error "Unknown DNS provider"; exit 1 ;;
+esac
+if [[ "$DRY_RUN" != y ]]; then
+    deployment_lock
+    if [[ -e "$STATE_DIR/active" || -L "$STATE_DIR/active" ]]; then
+        if ! pending_deployment=$(deployment_active); then
+            deployment_error "Cannot read the deployment recovery journal"
+            exit 1
+        fi
+        if ! deployment_rollback "$pending_deployment"; then
+            printf 'Rollback incomplete. Recovery data: %s\n' "$pending_deployment" >&2
+            exit 1
+        fi
+    fi
+    ssh_migration_rollback_expired
+    if ssh_migration_pending; then
+        deployment_error "Confirm the pending SSH migration or wait for its rollback"
+        exit 1
+    fi
+fi
+if [[ "$UNINSTALL" == y ]]; then
+    deployment_uninstall
+    exit
+fi
+Pak=apt-get
+
+arch() {
+    case "$(uname -m)" in
+        x86_64) printf 'amd64\n' ;;
+        aarch64) printf 'arm64\n' ;;
+        *) deployment_error "Unsupported CPU architecture"; return 1 ;;
+    esac
+}
+
+xray_bin() {
+    local architecture
+    architecture=$(arch) || return 1
+    printf '/usr/local/x-ui/bin/xray-linux-%s\n' "$architecture"
+}
+
+check_installed_panel_version() {
+    if [[ -x /usr/local/x-ui/x-ui ]]; then
+        local installed
+        installed=$(/usr/local/x-ui/x-ui -v)
+        installed=${installed##* }
+        if dpkg --compare-versions "${installed#v}" gt "${PANEL_VERSION#v}"; then
+            deployment_error "Installed panel is newer than the supported release"
+            return 1
+        fi
+    fi
+}
+
+prepare_panel_release() {
+    panel_needs_install=n
+    local asset="x-ui-linux-$(arch).tar.gz" expected xray_actual installed
+    case "$(arch)" in
+        amd64) expected=$PANEL_SHA256_AMD64 ;;
+        arm64) expected=$PANEL_SHA256_ARM64 ;;
+    esac
+    check_installed_panel_version || return 1
+    if [[ -x /usr/local/x-ui/x-ui ]]; then
+        installed=$(/usr/local/x-ui/x-ui -v)
+        installed=${installed##* }
+        if [[ "$installed" == "${PANEL_VERSION#v}" ]]; then
+            if [[ -x "/usr/local/x-ui/bin/xray-linux-$(arch)" ]]; then
+                xray_actual=$("/usr/local/x-ui/bin/xray-linux-$(arch)" version)
+                if [[ "$xray_actual" == "Xray ${XRAY_VERSION#v} "* ]]; then return 0; fi
+            fi
+        fi
+    fi
+    if [[ -f "/var/cache/vpn-script/$asset" ]] &&
+        printf '%s  %s\n' "$expected" "/var/cache/vpn-script/$asset" | sha256sum --check --status; then
+        cp -- "/var/cache/vpn-script/$asset" "$DEPLOYMENT/$asset"
+    else
+        curl -fL --retry 2 --max-time 180 --proto '=https' --proto-redir '=https' \
+            "https://github.com/MHSanaei/3x-ui/releases/download/$PANEL_VERSION/$asset" \
+            -o "$DEPLOYMENT/$asset"
+    fi
+    printf '%s  %s\n' "$expected" "$DEPLOYMENT/$asset" | sha256sum --check --status
+    tar -xzf "$DEPLOYMENT/$asset" -C "$DEPLOYMENT"
+    xray_actual=$("$DEPLOYMENT/x-ui/bin/xray-linux-$(arch)" version)
+    [[ "$xray_actual" == "Xray ${XRAY_VERSION#v} "* ]] || { deployment_error "Unexpected Xray version"; return 1; }
+    panel_needs_install=y
+}
+
+install_panel() {
+    if [[ "$panel_needs_install" != y ]]; then return 0; fi
+    install -d -m 755 /usr/local/x-ui
+    cp -a -- "$DEPLOYMENT/x-ui/." /usr/local/x-ui/
+    install -m 755 /usr/local/x-ui/x-ui.sh /usr/bin/x-ui
+    install -m 644 /usr/local/x-ui/x-ui.service.debian /etc/systemd/system/x-ui.service
+    systemctl daemon-reload
+}
 
 ###############################Install Required Packages & Utilities####################################
 setup_nginx_mainline_repo() {
-    # Why: Nginx Mainline (>=1.27) is required for native HTTP/2 proxying (proxy_http_version 2)
-    # and http2_recv_buffer_size, eliminating gRPC-framing overhead for raw xHTTP streaming.
-    if [[ "$Pak" != "apt" && "$Pak" != "apt-get" ]]; then
-        return 0
-    fi
-
-    # Ensure prerequisite utilities for GPG key import and repo setup
-    if ! command -v gpg >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
-        export DEBIAN_FRONTEND=noninteractive
-        $Pak -y update
-        $Pak -y install curl gnupg lsb-release ca-certificates
-    fi
-
     install -d -m 755 /usr/share/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d
-
-    # Import official nginx signing GPG key
-    curl -fsSL https://nginx.org/keys/nginx_signing.key \
-        | gpg --dearmor --yes -o /usr/share/keyrings/nginx-archive-keyring.gpg
-
-    local os_id distro_codename
-    os_id=$(. /etc/os-release 2>/dev/null && echo "${ID:-ubuntu}")
-    [[ "$os_id" != "debian" ]] && os_id="ubuntu"
-    distro_codename=$(. /etc/os-release 2>/dev/null && echo "${VERSION_CODENAME:-}")
-    if [[ -z "$distro_codename" ]] && command -v lsb_release >/dev/null 2>&1; then
-        distro_codename=$(lsb_release -cs)
-    fi
-
-    # Add official Nginx Mainline repository
-    echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/${os_id} ${distro_codename} nginx" \
-        > /etc/apt/sources.list.d/nginx-mainline.list
-
-    # Pinning: prefer official nginx.org packages over distribution packages
+    curl -fsSL https://nginx.org/keys/nginx_signing.key -o "$DEPLOYMENT/nginx.asc"
+    gpg --batch --show-keys --with-colons "$DEPLOYMENT/nginx.asc" > "$DEPLOYMENT/nginx.keys"
+    # A fetched key can contain unrelated public keys. Export only the approved key.
+    local fingerprint
+    install -d -m 700 "$DEPLOYMENT/gnupg"
+    gpg --batch --homedir "$DEPLOYMENT/gnupg" --import "$DEPLOYMENT/nginx.asc" >/dev/null 2>&1
+    : > /usr/share/keyrings/nginx-archive-keyring.gpg
+    for fingerprint in $NGINX_SIGNING_FINGERPRINTS; do
+        [[ "$fingerprint" =~ ^[A-F0-9]{40}$ ]]
+        grep -Fq ":${fingerprint}:" "$DEPLOYMENT/nginx.keys"
+        gpg --batch --homedir "$DEPLOYMENT/gnupg" --export "$fingerprint" >> /usr/share/keyrings/nginx-archive-keyring.gpg
+    done
+    chmod 644 /usr/share/keyrings/nginx-archive-keyring.gpg
+    printf 'deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/mainline/%s %s nginx\n' \
+        "$os_id" "$distro_codename" > /etc/apt/sources.list.d/nginx-mainline.list
     cat > /etc/apt/preferences.d/99-nginx-mainline << 'PREF'
-Package: nginx*
+Package: nginx
 Pin: origin nginx.org
-Pin-Priority: 1001
+Pin-Priority: 900
 PREF
-
-    # Remove conflicting distribution packages if present
-    $Pak -y remove nginx-full nginx-common nginx-core libnginx-mod-stream 2>/dev/null || true
 }
 
 install_dependencies() {
-	msg_inf "Installing required system packages and utilities..."
-	version=$(grep -oP '(?<=VERSION_ID=")[0-9]+' /etc/os-release 2>/dev/null || true)
-	if [[ "$version" == "20" || "$version" == "22" || "$version" == "24" ]]; then
-		echo "Версия системы: Ubuntu $version"
-	fi
-
-	if [[ "$Pak" == "apt" || "$Pak" == "apt-get" ]]; then
-		export DEBIAN_FRONTEND=noninteractive
-		setup_nginx_mainline_repo
-		$Pak -y update
-		$Pak -y install \
-			curl \
-			wget \
-			jq \
-			bash \
-			sudo \
-			netcat-openbsd \
-			psmisc \
-			procps \
-			tar \
-			unzip \
-			sqlite3 \
-			python3 \
-			ufw \
-			ca-certificates \
-			openssl \
-			tzdata \
-			lsb-release \
-			gnupg \
-			dnsutils \
-			nginx \
-			certbot \
-			python3-certbot-nginx \
-			fail2ban \
-			unattended-upgrades
-	else
-		$Pak -y update
-		$Pak -y install \
-			curl \
-			wget \
-			jq \
-			bash \
-			sudo \
-			nc \
-			psmisc \
-			procps-ng \
-			tar \
-			unzip \
-			sqlite \
-			python3 \
-			ufw \
-			ca-certificates \
-			openssl \
-			tzdata \
-			nginx \
-			certbot \
-			fail2ban \
-			unattended-upgrades 2>/dev/null || true
-	fi
-
-	systemctl daemon-reload 2>/dev/null || true
-	systemctl enable --now nginx 2>/dev/null || true
-	msg_ok "All required utilities installed successfully!"
-}
-
-##################################Unattended Upgrades Setup#############################################
-setup_unattended_upgrades() {
-    # Why: Ensure Linux kernel and OS packages receive automatic security fixes without manual intervention.
-    if ! command -v unattended-upgrade >/dev/null 2>&1; then
-        return 0
+    export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
+    # Keep package maintainer scripts from publishing services before configuration is ready.
+    local policy temporary
+    policy=/usr/sbin/policy-rc.d
+    if [[ -d "$policy" && ! -L "$policy" ]]; then
+        deployment_error "The service-start policy is not a file"
+        return 1
     fi
-    msg_inf "Configuring automatic security updates (unattended-upgrades)..."
-    mkdir -p /etc/apt/apt.conf.d
-
-    cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-EOF
-
-    cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'EOF'
-Unattended-Upgrade::Allowed-Origins {
-    "${distro_id}:${distro_codename}-security";
-    "${distro_id}ESMApps:${distro_codename}-apps-security";
-    "${distro_id}ESM:${distro_codename}-infrastructure-security";
-};
-Unattended-Upgrade::Package-Blacklist {
-};
-Unattended-Upgrade::AutoFixInterruptedDpkg "true";
-Unattended-Upgrade::MinimalSteps "true";
-Unattended-Upgrade::InstallOnShutdown "false";
-Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
-Unattended-Upgrade::Remove-Unused-Dependencies "true";
-Unattended-Upgrade::Automatic-Reboot "false";
-EOF
-
-    systemctl enable --now unattended-upgrades 2>/dev/null || true
-    msg_ok "Automatic security updates configured successfully!"
+    if [[ -e "$policy" || -L "$policy" ]]; then cp -a -- "$policy" "$DEPLOYMENT/policy.original"; fi
+    temporary=$(mktemp /usr/sbin/.vpn-script-policy.XXXXXXXX)
+    printf '#!/bin/sh\nexit 101\n' > "$temporary"
+    chmod 755 "$temporary"
+    mv -fT -- "$temporary" "$policy"
+    "$Pak" -y update
+    "$Pak" -y --no-remove install curl gnupg ca-certificates
+    setup_nginx_mainline_repo
+    "$Pak" -y update
+    local old_nginx
+    old_nginx=$(dpkg-query -W -f='${Version}' nginx 2>/dev/null || :)
+    if [[ -n "$old_nginx" && "$old_nginx" != "$NGINX_VERSION-1~$distro_codename" ]]; then
+        (cd "$DEPLOYMENT" && "$Pak" download "nginx=$old_nginx")
+    fi
+    "$Pak" -y --no-remove install "nginx=$NGINX_VERSION-1~$distro_codename" \
+        netcat-openbsd sqlite3 python3 python3-pip jq ufw openssl dnsutils certbot fail2ban python3-systemd
+    rm -f -- "$policy"
+    if [[ -e "$DEPLOYMENT/policy.original" || -L "$DEPLOYMENT/policy.original" ]]; then
+        mv -T -- "$DEPLOYMENT/policy.original" "$policy"
+    fi
 }
 
-if [[ ${INSTALL} != "n" ]]; then
-	install_dependencies
-	setup_unattended_upgrades
-fi
+validate_domain() {
+    local name="$1" label
+    local -a labels
+    [[ "${#name}" -le 253 && "$name" == *.* && "$name" != *. && "$name" != *..* ]] || return 1
+    IFS=. read -ra labels <<< "$name"
+    for label in "${labels[@]}"; do
+        [[ "${#label}" -le 63 && "$label" =~ ^[[:alnum:]]([[:alnum:]-]*[[:alnum:]])?$ ]] || return 1
+    done
+}
 
-# Cleanup old / legacy services
-systemctl stop x-ui 2>/dev/null || true
-rm -rf /etc/systemd/system/x-ui.service
-rm -rf /usr/local/x-ui
-rm -rf /etc/x-ui
-mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/stream-enabled /etc/nginx/snippets /etc/nginx/conf.d
-rm -rf /etc/nginx/sites-enabled/*
-rm -rf /etc/nginx/sites-available/*
-rm -rf /etc/nginx/stream-enabled/*
+for required in python3 ip ss flock; do
+    command -v "$required" >/dev/null || { deployment_error "Missing preflight command: $required"; exit 1; }
+done
+if [[ -f "$XUIDB" ]]; then
+    command -v sqlite3 >/dev/null || { deployment_error "sqlite3 is required for an existing database"; exit 1; }
+fi
+for protected_directory in "$XUIDB" /etc/x-ui /usr/local/x-ui /usr/local/x-ui/bin \
+    /usr/local/lib/vpn-script /usr/local/lib/vpn-script/probe-packages /etc/nginx; do
+    if [[ -L "$protected_directory" ]]; then
+        deployment_error "Managed installation path is a symbolic link: $protected_directory"
+        exit 1
+    fi
+done
+python3 - <<'PYTHON'
+import os
+from pathlib import Path
+
+memory = next(int(line.split()[1]) * 1024 for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemTotal:'))
+cgroup_limit = Path('/sys/fs/cgroup/memory.max')
+if cgroup_limit.exists() and cgroup_limit.read_text().strip().isdigit():
+    memory = min(memory, int(cgroup_limit.read_text().strip()))
+if memory < 512 * 1024**2:
+    raise SystemExit('Preflight: at least 512 MiB of RAM is required')
+size = 0
+for root in (Path('/usr/local/x-ui'), Path('/etc/x-ui')):
+    if root.exists():
+        size += sum(p.stat().st_size for p in root.rglob('*') if p.is_file() and not p.is_symlink())
+required = max(512 * 1024**2, size * 2 + 256 * 1024**2)
+for directory in ('/var/lib', '/usr/local'):
+    fs = os.statvfs(directory)
+    if fs.f_bavail * fs.f_frsize < required:
+        raise SystemExit('Preflight: insufficient space for verified artifacts and recovery snapshots')
+PYTHON
+. /etc/os-release
+os_id=$ID
+distro_codename=${VERSION_CODENAME:-}
+case "$os_id:$VERSION_ID:$distro_codename" in
+    ubuntu:22.04:jammy|ubuntu:24.04:noble|debian:12:bookworm) ;;
+    *) deployment_error "Unsupported operating system"; exit 1 ;;
+esac
+case "$(uname -m)" in
+    x86_64|aarch64) ;;
+    *) deployment_error "Unsupported CPU architecture"; exit 1 ;;
+esac
+dpkg --compare-versions "$NGINX_VERSION" ge "$NGINX_FUNCTIONAL_MIN" || {
+    deployment_error "Pinned Nginx does not meet the HTTP/2 minimum"; exit 1;
+}
+dpkg --compare-versions "$NGINX_VERSION" ge "$NGINX_SECURITY_MIN" || {
+    deployment_error "Pinned Nginx does not meet the security minimum"; exit 1;
+}
+
+if [[ "$AUTODOMAIN" == y ]]; then
+    if [[ -z "$PUBLIC_IP4" ]]; then
+        PUBLIC_IP4=$(ip -4 route get 1.1.1.1 | awk '{for (i=1;i<NF;i++) if ($i=="src") print $(i+1)}')
+    fi
+    domain="${PUBLIC_IP4}.cdn-one.org"
+elif [[ -z "$domain" && -t 0 ]]; then
+    read -rp 'Enter available subdomain: ' domain
+fi
+domain=${domain,,}
+LC_ALL=C validate_domain "$domain" || { deployment_error "Expected a valid fully qualified domain name"; exit 1; }
+if [[ -z "$SSH_PORT" ]]; then
+    saved_ssh_port=""
+    if [[ -f "$STATE_DIR/config.json" ]]; then
+        saved_ssh_port=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("ssh_port", ""))' "$STATE_DIR/config.json" 2>/dev/null || true)
+    fi
+    current_active_ssh=$(ssh_migration_current_port 2>/dev/null || true)
+
+    if [[ -t 0 && "$AUTODOMAIN" != y ]]; then
+        if [[ -n "$saved_ssh_port" && "$saved_ssh_port" =~ ^[1-9][0-9]{1,4}$ ]]; then
+            default_ssh_port="$saved_ssh_port"
+        elif [[ -n "$current_active_ssh" && "$current_active_ssh" != 22 ]]; then
+            default_ssh_port="$current_active_ssh"
+        else
+            default_ssh_port=${current_active_ssh:-22}
+        fi
+        read -rp "Requested SSH port [$default_ssh_port]: " answer_ssh_port
+        SSH_PORT=${answer_ssh_port:-$default_ssh_port}
+        if [[ -n "$current_active_ssh" ]]; then
+            if [[ "$SSH_PORT" != "$current_active_ssh" ]]; then
+                SSH_PORT_EXPLICIT=y
+            fi
+        elif [[ "$SSH_PORT" != "${saved_ssh_port:-22}" ]]; then
+            SSH_PORT_EXPLICIT=y
+        fi
+    else
+        SSH_PORT="${saved_ssh_port:-${current_active_ssh:-22}}"
+    fi
+fi
+if ! [[ "$SSH_PORT" =~ ^[1-9][0-9]{1,4}$ ]] || (( SSH_PORT < 22 || SSH_PORT > 65535 )); then
+    deployment_error "Invalid SSH port"
+    exit 1
+fi
+saved_mask=""
+previous_xhttp_config=""
+previous_xhttp_download=none
+if [[ -f "$STATE_DIR/config.json" ]]; then
+    saved_settings=$(python3 - "$STATE_DIR/config.json" <<'PYTHON'
+import json
+import sys
+with open(sys.argv[1]) as source:
+    config = json.load(source)
+for key, default in (("mask_upstream", ""), ("xhttp_config_path", ""), ("xhttp_download_path", "none")):
+    value = config.get(key, default)
+    if not isinstance(value, str) or any(ord(char) < 32 for char in value):
+        sys.exit("Invalid saved deployment settings")
+    print(value)
+PYTHON
+    )
+    mapfile -t settings <<< "$saved_settings"
+    saved_mask=${settings[0]}
+    previous_xhttp_config=${settings[1]}
+    previous_xhttp_download=${settings[2]}
+fi
+MASK_UPSTREAM=${MASK_UPSTREAM:-$saved_mask}
+if [[ -z "$MASK_UPSTREAM" && -n "$MASK_PORT" ]]; then MASK_UPSTREAM=http://127.0.0.1; fi
+if [[ -z "$MASK_UPSTREAM" ]]; then
+    deployment_error "Set -mask_port or -mask_upstream for the HTTP(S) cover service"
+    exit 1
+fi
+XHTTP_CONFIG_PATH=${XHTTP_CONFIG_PATH:-${previous_xhttp_config:-$STATE_DIR/xhttp.json}}
+XHTTP_DOWNLOAD_PATH=${XHTTP_DOWNLOAD_PATH:-$previous_xhttp_download}
+check_xhttp_config_path "$XHTTP_CONFIG_PATH"
+if [[ -n "$previous_xhttp_config" && "$previous_xhttp_config" != "$XHTTP_CONFIG_PATH" ]]; then
+    check_xhttp_config_path "$previous_xhttp_config"
+fi
+if [[ "$XHTTP_DOWNLOAD_PATH" != none &&
+    ! "$XHTTP_DOWNLOAD_PATH" =~ ^(/[A-Za-z0-9_-]+)*/[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)?$ ]]; then
+    deployment_error "Invalid -xhttp_download_path; use an absolute URL path such as /downloads/xhttp.json"
+    exit 1
+fi
+dns_preflight_check() {
+    python3 - "$domain" "$MASK_UPSTREAM" "$MASK_PORT" "$SSH_PORT" "$ANTILOOP_PORT" "$PUBLIC_IP4" "$PUBLIC_IP6" <<'PYTHON'
+import ipaddress
+import json
+import re
+import socket
+import subprocess
+import sys
+from urllib.parse import urlsplit
+
+domain, upstream, override, ssh, antiloop, ipv4, ipv6 = sys.argv[1:]
+try:
+    local = {
+        ipaddress.ip_address(addr["local"].split("%", 1)[0])
+        for iface in json.loads(subprocess.check_output(["ip", "-j", "addr", "show"]))
+        for addr in iface.get("addr_info", [])
+        if "local" in addr
+    }
+    for version, value in ((4, ipv4), (6, ipv6)):
+        if value:
+            addr = ipaddress.ip_address(value)
+            if addr.version != version or addr.is_unspecified or addr.is_loopback:
+                raise ValueError("invalid public IP override")
+            local.add(addr)
+    resolved = {ipaddress.ip_address(info[4][0]) for info in socket.getaddrinfo(domain, None)}
+    if not any(addr.version == 4 for addr in resolved) or not resolved <= local:
+        raise ValueError("DNS A/AAAA records must point to this node")
+    if not re.fullmatch(r"https?://(?:[a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\])(?::[0-9]{1,5})?", upstream):
+        raise ValueError("mask upstream must be an HTTP(S) origin without credentials")
+    parsed = urlsplit(upstream)
+    port = parsed.port
+    if override:
+        if not re.fullmatch(r"[1-9][0-9]{0,4}", override):
+            raise ValueError("invalid -mask_port")
+        port = int(override)
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("mask upstream port must be between 1 and 65535")
+    hostname = parsed.hostname
+    addresses = {ipaddress.ip_address(info[4][0].split("%", 1)[0]) for info in socket.getaddrinfo(hostname, port)}
+    addresses = {getattr(addr, "ipv4_mapped", None) or addr for addr in addresses}
+    is_local = bool(addresses & local) or any(addr.is_loopback or addr.is_unspecified for addr in addresses)
+    effective_port = port or (443 if parsed.scheme == "https" else 80)
+    if is_local and effective_port in {80, 443, int(ssh), int(antiloop)}:
+        raise ValueError("mask upstream would route back to this VPN")
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    print(f"{parsed.scheme}://{host}" + (f":{port}" if port is not None else ""))
+    print(effective_port if is_local else "")
+except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+    sys.exit(f"Preflight: {error}")
+PYTHON
+}
+mask_settings=$(dns_preflight_check)
+MASK_UPSTREAM=${mask_settings%%$'\n'*}
+mask_local_port=""
+if [[ "$mask_settings" == *$'\n'* ]]; then mask_local_port=${mask_settings##*$'\n'}; fi
+if [[ -z "$REALITY_TARGET" && -f "$STATE_DIR/config.json" ]]; then
+    REALITY_TARGET=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reality_target", "www.microsoft.com"))' "$STATE_DIR/config.json")
+fi
+REALITY_TARGET=${REALITY_TARGET:-www.microsoft.com}
+while true; do
+    if [[ "$REALITY_TARGET_EXPLICIT" == n && -t 0 ]]; then
+        read -rp "REALITY Classic site [$REALITY_TARGET]: " reality_answer
+        REALITY_TARGET=${reality_answer:-$REALITY_TARGET}
+    fi
+    REALITY_TARGET=${REALITY_TARGET,,}
+    if [[ "$DRY_RUN" == y ]]; then
+        python3 "$LIB_DIR/reality.py" target "$REALITY_TARGET" "$domain" --syntax-only
+        printf 'SKIP Classic target connectivity in dry-run; mandatory before deployment\n'
+        break
+    fi
+    if python3 "$LIB_DIR/reality.py" target "$REALITY_TARGET" "$domain" "$PUBLIC_IP4" "$PUBLIC_IP6"; then break; fi
+    if [[ "$REALITY_TARGET_EXPLICIT" == y || ! -t 0 ]]; then exit 1; fi
+    msg_err 'Site failed the public-address, certificate, TLS 1.3 or HTTP/2 check; choose another site.'
+done
+check_listener 80 t available nginx || { deployment_error "Foreign TCP listener on port 80"; exit 1; }
+check_listener 443 t available nginx || { deployment_error "Foreign TCP listener on port 443"; exit 1; }
+check_listener "$ANTILOOP_PORT" t available nginx || { deployment_error "Foreign TCP listener on fallback port"; exit 1; }
+check_listener 443 u available xray || { deployment_error "Foreign UDP listener on port 443"; exit 1; }
+ssh_proc="sshd"
+if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+    ssh_proc="sshd|systemd"
+fi
+check_listener "$SSH_PORT" t available "$ssh_proc" || { deployment_error "Requested SSH port belongs to another service"; exit 1; }
+
+managed_files=(
+    /etc/nginx/stream-enabled/stream.conf
+    /etc/nginx/conf.d/probe_security.conf
+    /etc/nginx/conf.d/00-vpn-script-http.conf
+    /etc/nginx/sites-available/80.conf
+    "/etc/nginx/sites-available/$domain"
+    /etc/nginx/sites-enabled/80.conf
+    "/etc/nginx/sites-enabled/$domain"
+    /etc/nginx/snippets/includes.conf
+    /etc/nginx/snippets/vpn-script-panel.conf
+    /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+    /etc/fail2ban/jail.d/99-sshd.local
+    /etc/systemd/system/nginx.service.d/vpn-script.conf
+    /etc/systemd/system/x-ui.service.d/vpn-script.conf
+    /etc/systemd/system/x-ui.service
+    /usr/local/sbin/vpn-script
+    /usr/local/lib/vpn-script/deployment.sh
+    /usr/local/lib/vpn-script/download.sh
+    /usr/local/lib/vpn-script/versions.conf
+    /usr/local/lib/vpn-script/ssh.sh
+    /usr/local/lib/vpn-script/xray_config.py
+    /usr/local/lib/vpn-script/reality.py
+    /usr/local/lib/vpn-script/release.sh
+    /usr/local/lib/vpn-script/certificate_probe.py
+    /usr/local/lib/vpn-script/probe-requirements.txt
+    "$XHTTP_CONFIG_PATH"
+)
+if [[ "$XHTTP_DOWNLOAD_PATH" != none ]]; then
+    managed_files+=("$XHTTP_WEB_CONFIG" "$XHTTP_WEB_AUTH")
+fi
+for apt_file in /usr/share/keyrings/nginx-archive-keyring.gpg +    /etc/apt/sources.list.d/nginx-mainline.list /etc/apt/preferences.d/99-nginx-mainline; do
+    if [[ "$INSTALL" == y ]] ||
+        [[ -f "$STATE_DIR/owned" && -n "$(awk -v path="$apt_file" '$2 == path {print $1}' "$STATE_DIR/owned")" ]]; then
+        managed_files+=("$apt_file")
+    fi
+done
+if [[ -f "$STATE_DIR/config.json" ]] && ! python3 - "$STATE_DIR/config.json" "$domain" <<'PYTHON'
+import json
+import sys
+with open(sys.argv[1]) as config:
+    sys.exit(json.load(config)["domain"] != sys.argv[2])
+PYTHON
+then
+    deployment_error "Changing the managed domain requires uninstalling the previous configuration"
+    exit 1
+fi
+retired_files=()
+if [[ -n "$previous_xhttp_config" && "$previous_xhttp_config" != "$XHTTP_CONFIG_PATH" ]]; then
+    retired_files+=("$previous_xhttp_config")
+fi
+if [[ "$previous_xhttp_download" != none && "$XHTTP_DOWNLOAD_PATH" == none ]]; then
+    retired_files+=("$XHTTP_WEB_CONFIG" "$XHTTP_WEB_AUTH")
+fi
+deployment_preflight_ownership "${managed_files[@]}" "${retired_files[@]}"
+if [[ -z "$DNS_PROVIDER" ]]; then
+    DNS_PROVIDER=none
+    if [[ -f "$STATE_DIR/config.json" ]]; then
+        DNS_PROVIDER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dns_provider"])' "$STATE_DIR/config.json")
+    elif [[ "$ADOPT_LEGACY" == y && -f "$XUIDB" ]]; then
+        if sqlite3 -batch -bail -readonly "$XUIDB" "SELECT value FROM settings WHERE key='xrayTemplateConfig';" | grep -F 'https+local://eu.geohide.ru/dns-query' > /dev/null; then
+            DNS_PROVIDER=geohide
+        fi
+    fi
+fi
+if [[ -f "$XUIDB" ]]; then
+    preview_adopt=$ADOPT_LEGACY
+    if [[ "$DRY_RUN" == y ]]; then preview_adopt=y; fi
+    python3 "$LIB_DIR/xray_config.py" preflight "$XUIDB" "$BLOCK_RU" "$DNS_PROVIDER" "$preview_adopt"
+fi
+check_installed_panel_version
+if [[ "$DRY_RUN" == y ]]; then
+    printf 'Preflight passed for %s\n' "$domain"
+    exit 0
+fi
+deployment_begin "${managed_files[@]}" "${retired_files[@]}" /etc/nginx/nginx.conf /usr/local/x-ui /usr/bin/x-ui \
+    /usr/local/lib/vpn-script/probe-packages \
+    /etc/ufw/user.rules /etc/ufw/user6.rules /usr/sbin/policy-rc.d \
+    "$STATE_DIR/owned" "$STATE_DIR/config.json" "$STATE_DIR/credentials"
+trap 'deployment_exit "$?"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ "$INSTALL" == y ]]; then
+    install_dependencies
+fi
+install_probe_dependencies
+for required in sqlite3 nginx openssl certbot ufw curl; do
+    command -v "$required" >/dev/null || { deployment_error "Missing dependency: $required"; exit 1; }
+done
+if ! curl -q --noproxy '*' -sS --max-time 5 -o /dev/null "$MASK_UPSTREAM/"; then
+    deployment_error "Cannot reach the HTTP(S) cover service at $MASK_UPSTREAM"
+    exit 1
+fi
+for unit in nginx x-ui; do
+    install -d -m 755 "/etc/systemd/system/$unit.service.d"
+    printf '[Service]\nLimitNOFILE=65535\n' > "/etc/systemd/system/$unit.service.d/vpn-script.conf"
+done
+systemctl daemon-reload
+nginx_actual=$(nginx -v 2>&1)
+[[ "$nginx_actual" == "nginx version: nginx/$NGINX_VERSION" ]] || { deployment_error "Unexpected Nginx version"; exit 1; }
+prepare_panel_release
+install_geodata /usr/local/x-ui/bin prepare
+allow_web_ports
+if systemctl is-active --quiet x-ui.service; then systemctl stop x-ui.service; fi
 
 ##################################generate ports and paths#############################################################
 declare -A USED_PORTS=()
 USED_PORTS["${ANTILOOP_PORT}"]=1
+USED_PORTS["$SSH_PORT"]=1
+if [[ -n "$mask_local_port" ]]; then USED_PORTS["$mask_local_port"]=1; fi
 
 get_port() {
     echo $(( ((RANDOM << 15) | RANDOM) % 49152 + 10000 ))
@@ -274,19 +596,20 @@ gen_random_string() {
     printf '%s\n' "${out:0:length}"
 }
 
-check_free() {
-    local port="$1"
-    ! nc -z 127.0.0.1 "$port" >/dev/null 2>&1
+gen_header_name() {
+    local prefixes=("X-Track-Session" "X-Download-Id" "X-Queue-Token" "X-Chunk-Seq" "X-Library-Sync" "X-Stream-Ctx")
+    echo "${prefixes[$((RANDOM % ${#prefixes[@]}))]}"
 }
 
 make_port() {
-    local port
+    local port rows
     while true; do
         port=$(get_port)
         [[ -z ${USED_PORTS[$port]+x} ]] || continue
-        if check_free "$port"; then
+        rows=$(ss -H -ltn "sport = :$port") || return 1
+        if [[ -z "$rows" ]]; then
             USED_PORTS["$port"]=1
-            printf '%s\n' "$port"
+            printf -v "$1" '%s' "$port"
             return 0
         fi
     done
@@ -296,269 +619,189 @@ make_port() {
 panel_port=""
 panel_path=""
 xhttp_port=""
+xhttp_path=""
+x_padding_key="" ; x_padding_header="" ; session_id_key="" ; seq_key=""
+existing_xhttp=n
+nginx_guard_enabled=y
 
 if [[ -f "$XUIDB" ]]; then
-    _db_val() { sqlite3 "$XUIDB" "SELECT value FROM settings WHERE key='$1' LIMIT 1;" 2>/dev/null || true; }
-    _db_inbound_port() { sqlite3 "$XUIDB" "SELECT port FROM inbounds WHERE protocol='$1' LIMIT 1;" 2>/dev/null || true; }
-    
-    saved_panel_port=$(_db_val "webPort")
-    saved_panel_path=$(_db_val "webBasePath")
-    
-    [[ "$saved_panel_port" =~ ^[0-9]+$ ]] && [[ "$saved_panel_port" -gt 1024 ]] && panel_port="$saved_panel_port"
-    [[ -n "$saved_panel_path" ]] && panel_path=$(echo "$saved_panel_path" | tr -d '/')
-    
-    saved_xhttp_port=$(_db_inbound_port "vless" | head -n 1)
-    [[ "$saved_xhttp_port" =~ ^[0-9]+$ ]] && [[ "$saved_xhttp_port" -gt 1024 ]] && xhttp_port="$saved_xhttp_port"
-fi
-
-[[ -z "$panel_port" ]] && panel_port=$(make_port)
-[[ -z "$panel_path" ]] && panel_path=$(gen_random_string 10)
-[[ -z "$xhttp_port" ]] && xhttp_port=$(make_port)
-config_username=$(gen_random_string 10)
-config_password=$(gen_random_string 10)
-
-# --- get public IPv4 early (for auto-domain mode)
-IP4_REGEX="^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$"
-IP4=$(ip route get 8.8.8.8 2>/dev/null | awk '/ src / {for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)
-if ! [[ "$IP4" =~ $IP4_REGEX ]]; then
-    IP4=$(curl -4fsS --max-time 10 https://ipv4.icanhazip.com | tr -d '[:space:]' || true)
-fi
-
-if [[ ${AUTODOMAIN} == *"y"* ]]; then
-    # panel domain: x.x.x.x.cdn-one.org
-    domain="${IP4}.cdn-one.org"
-fi
-
-##############################Domain Validations########################################################
-validate_domain() {
-    local value="$1"
-    [[ -n "$value" ]] || return 1
-    [[ ${#value} -le 253 ]] || return 1
-    [[ "$value" != .* && "$value" != *. ]] || return 1
-    [[ "$value" != *..* ]] || return 1
-    [[ "$value" != *"'"* ]] || return 1
-    [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || return 1
-}
-
-sql_escape() {
-    local value="$1"
-    value=${value//\'/\'\'}
-    printf '%s' "$value"
-}
-
-while true; do	
-	if [[ -n "$domain" ]]; then
-		domain=$(echo "$domain" 2>&1 | tr -d '[:space:]')
-		if validate_domain "$domain"; then
-			break
-		else
-			msg_err "Invalid domain format: $domain"
-			domain=""
-		fi
-	fi
-	echo -en "Enter available subdomain (sub.domain.tld): " && read -r domain 
-done
-
-SubDomain=$(echo "$domain" 2>&1 | sed 's/^[^ ]* \|\..*//g')
-MainDomain=$(echo "$domain" 2>&1 | sed 's/.*\.\([^.]*\..*\)$/\1/')
-
-if [[ "${SubDomain}.${MainDomain}" != "${domain}" ]] ; then
-	MainDomain=${domain}
-fi
-
-if [[ -z "$SSH_PORT" ]]; then
-	if [ -t 0 ] && [[ "$AUTODOMAIN" != "y" ]]; then
-		echo -en "Enter SSH port to harden server [default: 60022, press Enter for 60022, or 22 to keep]: " && read -r input_ssh_port
-		SSH_PORT="${input_ssh_port:-60022}"
-	else
-		SSH_PORT="22"
-	fi
-fi
-
-if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 22 ] || [ "$SSH_PORT" -gt 65535 ]; then
-	msg_err "Invalid SSH port: $SSH_PORT. Falling back to 22."
-	SSH_PORT=22
-fi
-
-setup_ssh_port() {
-    local target_port="${SSH_PORT:-22}"
-    if [[ "$target_port" == "22" ]]; then
-        msg_inf "SSH port remains standard 22."
-        return 0
-    fi
-
-    msg_inf "Hardening SSH: moving from port 22 to $target_port..."
-    # Guarantee firewall allows the new port BEFORE touching sshd configuration
-    if command -v ufw >/dev/null 2>&1; then
-        ufw allow "${target_port}/tcp" >/dev/null 2>&1 || true
-    fi
-
-    mkdir -p /etc/ssh/sshd_config.d
-    cat > /etc/ssh/sshd_config.d/99-custom-port.conf << EOF
-# Custom hardened SSH port configured by vpn_script
-Port ${target_port}
-EOF
-
-    # Verify sshd configuration syntax before applying
-    if command -v sshd >/dev/null 2>&1; then
-        if ! sshd -t 2>/dev/null; then
-            msg_err "sshd configuration syntax test failed with drop-in. Reverting to port 22."
-            rm -f /etc/ssh/sshd_config.d/99-custom-port.conf
-            return 1
-        fi
-    fi
-
-    # Reload / restart SSH daemon safely (does not terminate active established connections)
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl reload-or-restart ssh 2>/dev/null || systemctl reload-or-restart sshd 2>/dev/null || true
-    elif command -v service >/dev/null 2>&1; then
-        service ssh reload 2>/dev/null || service ssh restart 2>/dev/null || true
-    fi
-
-    # Remove port 22 from UFW now that the new port is active
-    if command -v ufw >/dev/null 2>&1; then
-        ufw delete allow 22/tcp >/dev/null 2>&1 || true
-    fi
-    msg_ok "SSH moved to port $target_port successfully."
-}
-
-###############################Prepare Ports and Firewalls for SSL######################################
-# Keep the firewall enabled while Certbot binds to ports 80/443.
-ufw allow 80/tcp >/dev/null 2>&1 || true
-ufw allow 443/tcp >/dev/null 2>&1 || true
-systemctl stop nginx 2>/dev/null || true
-fuser -k 80/tcp 80/udp 443/tcp 443/udp 2>/dev/null || true
-##################################GET SERVER IPv4-6#####################################################
-IP4_REGEX="^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$"
-IP6_REGEX="([a-f0-9:]+:+)+[a-f0-9]+"
-IP4=$(ip route get 8.8.8.8 2>/dev/null | awk '/ src / {for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)
-IP6=$(ip route get 2620:fe::fe 2>/dev/null | awk '/ src / {for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true)
-[[ "$IP4" =~ $IP4_REGEX ]] || IP4=$(curl -4fsS --max-time 10 https://ipv4.icanhazip.com | tr -d '[:space:]' || true)
-[[ "$IP6" =~ $IP6_REGEX ]] || IP6=$(curl -6fsS --max-time 10 https://ipv6.icanhazip.com | tr -d '[:space:]' || true)
-##############################Install SSL###############################################################
-
-dns_preflight_check() {
-    # Why: Verify public DNS A-record points to this server IP before invoking Certbot.
-    # Prevents triggering Let's Encrypt rate limits (failed validation limits: 5 failures/hour).
-    local dom="$1"
-    local server_ip="${IP4:-}"
-    local resolved_ip=""
-
-    [[ -z "$dom" ]] && return 0
-
-    msg_inf "DNS preflight: checking A-record for ${dom}..."
-
-    # Try authoritative public DNS via dig, fallback to getent
-    if command -v dig >/dev/null 2>&1; then
-        resolved_ip=$(dig +short +time=5 +tries=2 "$dom" A @1.1.1.1 2>/dev/null | grep -E '^[0-9]+\.' | head -n1 || true)
-    fi
-    if [[ -z "$resolved_ip" ]]; then
-        resolved_ip=$(getent ahostsv4 "$dom" 2>/dev/null | awk '{print $1}' | head -n1 || true)
-    fi
-
-    if [[ -z "$resolved_ip" ]]; then
-        msg_err "Domain ${dom} does not resolve (NXDOMAIN). Check your DNS A-record."
-        return 1
-    elif [[ -n "$server_ip" && "$resolved_ip" != "$server_ip" ]]; then
-        msg_err "IP mismatch: ${dom} resolves to ${resolved_ip}, but server IP is ${server_ip}."
-        msg_inf "Wait for DNS propagation (TTL) or verify DNS management console."
-        return 1
-    fi
-
-    msg_ok "DNS preflight passed: ${dom} -> ${resolved_ip}"
-    return 0
-}
-
-resolve_to_ip () {
-    local host="$1"
-    # get first A-record
-    local a
-    a=$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1{print $1}')
-    [[ -n "$a" ]] && [[ "$a" == "$IP4" ]]
-}
-
-if [[ ${AUTODOMAIN} == *"y"* ]]; then
-    if ! dns_preflight_check "$domain"; then
-        msg_err "Auto-domain $domain does not resolve to this server IP ($IP4). Fix DNS/service and retry."
+    _db_val() { sqlite3 -batch -bail -readonly "$XUIDB" "SELECT DISTINCT value FROM settings WHERE key='$1';"; }
+    xhttp_filter="protocol='vless' AND enable=1 AND json_extract(stream_settings,'$.network')='xhttp' AND coalesce(json_extract(stream_settings,'$.security'),'none')='none'"
+    xhttp_count=$(sqlite3 -batch -bail -readonly "$XUIDB" "SELECT count(*) FROM inbounds WHERE $xhttp_filter;")
+    hy2_count=$(sqlite3 -batch -bail -readonly "$XUIDB" "SELECT count(*) FROM inbounds WHERE protocol IN ('hysteria','hysteria2') AND port=443 AND enable=1 AND json_extract(settings,'$.version')=2;")
+    inbound_count=$(sqlite3 -batch -bail -readonly "$XUIDB" 'SELECT count(*) FROM inbounds;')
+    if (( inbound_count > 0 )) && (( xhttp_count != 1 || hy2_count != 1 )); then
+        deployment_error "Expected one enabled xHTTP inbound and one enabled Hysteria 2 inbound on UDP/443"
         exit 1
     fi
+    panel_port=$(_db_val webPort)
+    panel_path=$(_db_val webBasePath)
+    panel_path=${panel_path#/}
+    panel_path=${panel_path%/}
+    if (( xhttp_count == 1 )); then
+        existing_xhttp=y
+        padding_mode=$(sqlite3 -batch -bail -readonly "$XUIDB" "SELECT coalesce(json_extract(stream_settings,'$.xhttpSettings.xPaddingObfsMode'),0) || ':' || coalesce(json_extract(stream_settings,'$.xhttpSettings.xPaddingPlacement'),'') FROM inbounds WHERE $xhttp_filter;")
+        if [[ "$padding_mode" != 1:header ]]; then nginx_guard_enabled=n; fi
+        xhttp_port=$(sqlite3 -batch -bail -readonly "$XUIDB" "SELECT port FROM inbounds WHERE $xhttp_filter;")
+        xhttp_settings=$(sqlite3 -batch -bail -readonly "$XUIDB" "
+            SELECT coalesce(json_extract(stream_settings,'$.xhttpSettings.path'),'') || char(10) ||
+                   coalesce(json_extract(stream_settings,'$.xhttpSettings.xPaddingKey'),'') || char(10) ||
+                   coalesce(json_extract(stream_settings,'$.xhttpSettings.xPaddingHeader'),'') || char(10) ||
+                   coalesce(json_extract(stream_settings,'$.xhttpSettings.sessionIDKey'),'') || char(10) ||
+                   coalesce(json_extract(stream_settings,'$.xhttpSettings.seqKey'),'') || char(10) || 'end'
+            FROM inbounds WHERE $xhttp_filter;")
+        mapfile -t xhttp_meta <<< "$xhttp_settings"
+        (( ${#xhttp_meta[@]} == 6 )) || { deployment_error "Could not read existing xHTTP settings"; exit 1; }
+        xhttp_path=${xhttp_meta[0]}
+        x_padding_key=${xhttp_meta[1]}
+        x_padding_header=${xhttp_meta[2]}
+        session_id_key=${xhttp_meta[3]}
+        seq_key=${xhttp_meta[4]}
+    fi
 fi
 
+[[ -z "$panel_port" ]] && make_port panel_port
+[[ -z "$panel_path" ]] && panel_path=$(gen_random_string 24)
+if [[ -z "$xhttp_port" ]]; then
+    USED_PORTS["$panel_port"]=1
+    make_port xhttp_port
+fi
+[[ -z "$xhttp_path" ]] && xhttp_path="/api/library/stream/$(gen_random_string 8)/chunks/"
+if ! [[ "$panel_port" =~ ^[1-9][0-9]{3,4}$ && "$xhttp_port" =~ ^[1-9][0-9]{3,4}$ &&
+    "$panel_path" =~ ^[A-Za-z0-9_-]+$ && "$xhttp_path" =~ ^(/[A-Za-z0-9_-]+)+/$ ]]; then
+    deployment_error "Existing panel or xHTTP settings cannot be safely rendered"
+    exit 1
+fi
+if (( panel_port > 65535 || xhttp_port > 65535 || panel_port == xhttp_port ||
+    panel_port == ANTILOOP_PORT || xhttp_port == ANTILOOP_PORT ||
+    panel_port == SSH_PORT || xhttp_port == SSH_PORT ||
+    panel_port == ${mask_local_port:-0} || xhttp_port == ${mask_local_port:-0} )); then
+    deployment_error "Existing panel or xHTTP port conflicts"
+    exit 1
+fi
+if [[ "$XHTTP_DOWNLOAD_PATH" == "/$panel_path" || "$XHTTP_DOWNLOAD_PATH" == "/$panel_path/"* ||
+    "$XHTTP_DOWNLOAD_PATH" == "${xhttp_path%/}" || "$XHTTP_DOWNLOAD_PATH" == "$xhttp_path"* ]]; then
+    deployment_error "xHTTP download path overlaps the panel or xHTTP transport"
+    exit 1
+fi
+for header in "$x_padding_key" "$x_padding_header" "$session_id_key" "$seq_key"; do
+    [[ -z "$header" || "$header" =~ ^[A-Za-z0-9-]+$ ]] || { deployment_error "Unsafe xHTTP header"; exit 1; }
+done
+check_listener "$panel_port" t available x-ui
+check_listener "$xhttp_port" t available xray
 
-resolve_cert_path() {
-    if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
-        return 0
+generate_unique_headers() {
+    local -a used=()
+    local val
+    for varname in x_padding_key x_padding_header session_id_key seq_key; do
+        local cur="${!varname}"
+        if [[ -z "$cur" || "$cur" == "null" ]]; then
+            while true; do
+                val=$(gen_header_name)
+                # shellcheck disable=SC2076
+                [[ ! " ${used[*]} " =~ " ${val} " ]] && break
+            done
+            printf -v "$varname" '%s' "$val"
+        fi
+        used+=("${!varname}")
+    done
+}
+if [[ "$existing_xhttp" == n ]]; then generate_unique_headers; fi
+python3 "$LIB_DIR/reality.py" ports "$XUIDB" "$panel_port" "$xhttp_port" "$ANTILOOP_PORT" "$SSH_PORT" "${mask_local_port:-0}" > "$DEPLOYMENT/reality-ports.json"
+readarray -t reality_ports < <(python3 - "$DEPLOYMENT/reality-ports.json" <<'PY'
+import json, sys
+ports = json.load(open(sys.argv[1]))
+for role in ('self_raw', 'self_xhttp', 'classic_raw', 'classic_xhttp'):
+    print(ports[role])
+PY
+)
+(( ${#reality_ports[@]} == 4 )) || { deployment_error 'Invalid REALITY port allocation'; exit 1; }
+for reality_port in "${reality_ports[@]}"; do
+    check_listener "$reality_port" t available xray
+done
+config_username=$(gen_random_string 10)
+config_password=$(gen_random_string 32)
+
+##################################Managed ACME HTTP configuration########################################
+ACME_WEBROOT=/var/www/vpn-script-acme
+install -d -m 755 "$ACME_WEBROOT" /etc/nginx/stream-enabled /etc/nginx/sites-available \
+    /etc/nginx/sites-enabled /etc/nginx/snippets /etc/nginx/conf.d
+[[ -d /dev/shm ]]
+if ! grep -Eq "^[[:space:]]*include[[:space:]]+[\"']?/etc/nginx/sites-enabled/\*[\"']?[[:space:]]*;" /etc/nginx/nginx.conf; then
+    sed -i '/^[[:space:]]*http[[:space:]]*{/a\# BEGIN vpn-script sites\n    include /etc/nginx/sites-enabled/*;\n# END vpn-script sites' /etc/nginx/nginx.conf
+fi
+cat > /etc/nginx/sites-available/80.conf << EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${domain};
+    location /.well-known/acme-challenge/ {
+        root ${ACME_WEBROOT};
+    }
+    location / {
+        return 301 https://${domain}\$request_uri;
+    }
+}
+EOF
+rm -f "/etc/nginx/sites-enabled/$domain" /etc/nginx/sites-enabled/80.conf
+nginx_buckets=$(nginx -T | awk '
+    /^# configuration file / { managed=($0 ~ /\/etc\/nginx\/conf\.d\/00-vpn-script-http\.conf:$/) }
+    !managed && /^[[:space:]]*(server_names_hash_bucket_size|map_hash_bucket_size)[[:space:]]/ {
+        print $1
+    }')
+rm -f /etc/nginx/conf.d/00-vpn-script-http.conf
+for directive in server_names_hash_bucket_size map_hash_bucket_size; do
+    if ! grep -Fxq "$directive" <<< "$nginx_buckets"; then
+        printf '%s 512;\n' "$directive" >> /etc/nginx/conf.d/00-vpn-script-http.conf
     fi
-    local alt_dir
-    alt_dir=$(ls -d /etc/letsencrypt/live/${domain}-*/ 2>/dev/null | sort -V | tail -n 1)
-    if [[ -n "$alt_dir" && -f "${alt_dir}fullchain.pem" ]]; then
-        mkdir -p "/etc/letsencrypt/live/${domain}"
-        ln -sf "${alt_dir}fullchain.pem" "/etc/letsencrypt/live/${domain}/fullchain.pem"
-        ln -sf "${alt_dir}privkey.pem" "/etc/letsencrypt/live/${domain}/privkey.pem"
-        return 0
-    fi
-    return 1
+done
+ln -sfn /etc/nginx/sites-available/80.conf /etc/nginx/sites-enabled/80.conf
+nginx -t
+systemctl reload-or-restart nginx.service
+
+certificate_ok() {
+    local dir="$1" cert_pub key_pub
+    [[ -r "$dir/fullchain.pem" && -r "$dir/privkey.pem" && -r "$dir/chain.pem" ]] || return 1
+    openssl x509 -checkend 0 -noout -in "$dir/fullchain.pem" >/dev/null || return 1
+    openssl verify -verify_hostname "$domain" -untrusted "$dir/chain.pem" "$dir/fullchain.pem" >/dev/null || return 1
+    cert_pub=$(openssl x509 -pubkey -noout -in "$dir/fullchain.pem") || return 1
+    key_pub=$(openssl pkey -pubout -in "$dir/privkey.pem") || return 1
+    [[ "$cert_pub" == "$key_pub" ]]
 }
 
-mkdir -p /var/www/html
-if ! resolve_cert_path; then
-    if ! dns_preflight_check "$domain"; then
-        if [[ -t 0 ]]; then
-            read -rp "DNS check failed. Continue requesting SSL certificate anyway? [y/N]: " continue_ssl || true
-            if [[ ! "$continue_ssl" =~ ^[Yy]$ ]]; then
-                msg_err "Aborting SSL certificate generation due to DNS check failure."
-                exit 1
-            fi
-        else
-            msg_inf "Non-interactive mode detected; continuing with certbot attempt..."
-        fi
+CERT_DIR="/etc/letsencrypt/live/$domain"
+if [[ ! -e "$CERT_DIR" ]]; then
+    shopt -s nullglob
+    alternate=(/etc/letsencrypt/live/"$domain"-[0-9]*)
+    shopt -u nullglob
+    if (( ${#alternate[@]} == 1 )); then
+        CERT_DIR=${alternate[0]}
+    elif (( ${#alternate[@]} > 1 )); then
+        deployment_error "Multiple matching certificate lineages; select the desired lineage before installation"
+        exit 1
+    else
+        certbot certonly --webroot -w "$ACME_WEBROOT" --non-interactive --agree-tos \
+            --register-unsafely-without-email --cert-name "$domain" -d "$domain"
     fi
-
-    certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name "$domain" --keep-until-expiring -d "$domain" || \
-    certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos --register-unsafely-without-email --cert-name "$domain" --keep-until-expiring -d "$domain" || true
-    resolve_cert_path || true
 fi
+certificate_ok "$CERT_DIR" || { deployment_error "Existing certificate or key is not valid for $domain"; exit 1; }
 
-if [[ ! -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
- 	systemctl start nginx >/dev/null 2>&1 || true
-	msg_err "$domain SSL could not be generated! Check Domain/IP Or Enter new domain!" && exit 1
-fi
-################################# Certbot renewal hook ##################################################
-mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh << 'HOOK'
+install -d -m 755 /etc/letsencrypt/renewal-hooks/deploy
+cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh << EOF
 #!/bin/bash
-systemctl reload nginx 2>/dev/null || /usr/sbin/nginx -s reload 2>/dev/null || true
-HOOK
-chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
-################################# Access to configs only with cloudflare#################################
-
-###################################Get Installed XUI Port/Path##########################################
-if [[ -f $XUIDB ]]; then
-	XUIPORT=$(sqlite3 -list "$XUIDB" 'SELECT "value" FROM settings WHERE "key"="webPort" LIMIT 1;' 2>&1)
-	XUIPATH=$(sqlite3 -list "$XUIDB" 'SELECT "value" FROM settings WHERE "key"="webBasePath" LIMIT 1;' 2>&1)
-if [[ $XUIPORT -gt 0 && $XUIPORT != "54321" && $XUIPORT != "2053" ]] && [[ ${#XUIPORT} -gt 4 ]]; then
-	RNDSTR=$(echo "$XUIPATH" 2>&1 | tr -d '/')
-	PORT=$XUIPORT
-	sqlite3 "$XUIDB" <<EOF
-	DELETE FROM "settings" WHERE ( "key"="webCertFile" ) OR ( "key"="webKeyFile" ); 
-	INSERT INTO "settings" ("key", "value") VALUES ("webCertFile",  "");
-	INSERT INTO "settings" ("key", "value") VALUES ("webKeyFile", "");
+set -euo pipefail
+[[ "\${RENEWED_LINEAGE:-}" == "$CERT_DIR" ]] || exit 0
+nginx -t
+systemctl reload nginx.service
+systemctl restart x-ui.service
+for attempt in {1..5}; do
+    /usr/bin/python3 /usr/local/lib/vpn-script/certificate_probe.py "$domain" "$CERT_DIR/fullchain.pem" && exit 0
+    sleep 1
+done
+printf 'Certificate fingerprint mismatch after renewal\\n' >&2
+exit 1
 EOF
-fi
-fi
-#################################Nginx Config###########################################################
-# Why: Ensure /dev/shm tmpfs directory exists for high-performance zero-copy Unix domain socket
-install -d -m 755 /dev/shm
-
-install -d -m 700 "/root/cert/${domain}"
-chmod 700 /root/cert/
-rm -f /root/cert/${domain}/*
-
-ln -sf /etc/letsencrypt/live/${domain}/fullchain.pem /root/cert/${domain}/fullchain.pem
-ln -sf /etc/letsencrypt/live/${domain}/privkey.pem /root/cert/${domain}/privkey.pem
-
-mkdir -p /etc/nginx/stream-enabled /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/snippets /etc/nginx/conf.d
-rm -f /etc/nginx/conf.d/default.conf
+chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
 # Why: Public L4 stream router listens on both IPv4 and IPv6 (if available).
 # Internal upstream uses RAM unix socket (/dev/shm/nginx-http.sock), avoiding loopback TCP overhead.
 IPV6_STREAM=""
@@ -569,7 +812,8 @@ fi
 cat > "/etc/nginx/stream-enabled/stream.conf" << EOF
 map \$ssl_preread_server_name \$sni_name {
     hostnames;
-    ${domain}           www;
+    ${domain}           reality_failover;
+    ${REALITY_TARGET}   reality_classic;
     default              www;
 }
 
@@ -584,8 +828,12 @@ upstream www {
 # local mask site (backup socket) instead of terminating with connection refused,
 # preventing active DPI probing detection.
 upstream reality_failover {
-    server 127.0.0.1:${ANTILOOP_PORT};
+    server 127.0.0.1:${reality_ports[0]} fail_timeout=1s;
     server unix:/dev/shm/nginx-http.sock backup;
+}
+
+upstream reality_classic {
+    server 127.0.0.1:${reality_ports[2]};
 }
 
 server {
@@ -598,37 +846,13 @@ server {
 
 EOF
 
-# Why: Load dynamic stream module only if module file exists and not already loaded/built-in
-if [[ -f /usr/lib/nginx/modules/ngx_stream_module.so ]] && ! grep -rq "ngx_stream_module" /etc/nginx/ 2>/dev/null; then
-    sed -i '1s/^/load_module \/usr\/lib\/nginx\/modules\/ngx_stream_module.so; /' /etc/nginx/nginx.conf
+if ! grep -Fq '/etc/nginx/stream-enabled/*.conf' /etc/nginx/nginx.conf; then
+    cat >> /etc/nginx/nginx.conf <<'NGINX'
+# BEGIN vpn-script stream
+stream { include /etc/nginx/stream-enabled/*.conf; }
+# END vpn-script stream
+NGINX
 fi
-
-sed -i "/worker_connections/c\worker_connections 4096;" /etc/nginx/nginx.conf 2>/dev/null || true
-
-# Worker rlimit (idempotent)
-sed -i "/worker_rlimit_nofile/d" /etc/nginx/nginx.conf 2>/dev/null || true
-echo "worker_rlimit_nofile 16384;" >> /etc/nginx/nginx.conf
-
-# Stream block inclusion (idempotent)
-sed -i "/stream-enabled/d" /etc/nginx/nginx.conf 2>/dev/null || true
-echo "stream { include /etc/nginx/stream-enabled/*.conf; }" >> /etc/nginx/nginx.conf
-
-# HTTP block inclusions (idempotent)
-sed -i "/http2_recv_buffer_size/d" /etc/nginx/nginx.conf 2>/dev/null || true
-sed -i '/http {/a \    http2_recv_buffer_size 16m;' /etc/nginx/nginx.conf
-
-# Ensure conf.d/*.conf is loaded BEFORE sites-enabled/* (so probe_combined log format is defined first)
-sed -i "/conf\.d\/\*\.conf/d" /etc/nginx/nginx.conf 2>/dev/null || true
-sed -i "/sites-enabled/d" /etc/nginx/nginx.conf 2>/dev/null || true
-sed -i '/http {/a \    include /etc/nginx/conf.d/*.conf;\n    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
-
-# Prepare probe log file and directory with secure permissions
-mkdir -p /var/log/nginx
-touch /var/log/nginx/probe.log
-chmod 640 /var/log/nginx/probe.log
-NGX_LOG_USER=$(awk '$1=="user" {gsub(";", "", $2); print $2; exit}' /etc/nginx/nginx.conf 2>/dev/null || echo "www-data")
-[[ -z "$NGX_LOG_USER" ]] && NGX_LOG_USER="www-data"
-chown "${NGX_LOG_USER}:adm" /var/log/nginx/probe.log 2>/dev/null || chown www-data:adm /var/log/nginx/probe.log 2>/dev/null || true
 
 # Nginx Rate Limiting and Attack Probe Logging
 mkdir -p /etc/nginx/conf.d
@@ -646,19 +870,13 @@ log_format probe_combined '$remote_addr - $remote_user [$time_local] '
                           '"$http_referer" "$http_user_agent"';
 EOF
 
-cat > "/etc/nginx/sites-available/80.conf" << EOF
-server {
-    listen 80;
-    server_name ${domain};
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
-}
-EOF
-
+nginx_pad_header_slug=$(echo "${x_padding_header}" | tr '[:upper:]-' '[:lower:]_')
+nginx_header_guard=""
+if [[ "$nginx_guard_enabled" == y && -n "$nginx_pad_header_slug" ]]; then
+    printf -v nginx_header_guard '    if ($http_%s = "") { return 418; }' "$nginx_pad_header_slug"
+fi
+mask_authority=${MASK_UPSTREAM#*://}
+mask_hostname=$(python3 -c 'import sys; from urllib.parse import urlsplit; print(urlsplit(sys.argv[1]).hostname)' "$MASK_UPSTREAM")
 
 cat > "/etc/nginx/sites-available/${domain}" << EOF
 # Why: Reject direct IP scans and TLS handshakes with missing/non-matching SNI,
@@ -670,12 +888,16 @@ server {
 
 server {
 # =====================================================================
-# VLESS XHTTP STREAM-ONE (Native HTTP/2 Proxying)
+# VLESS XHTTP STREAM-ONE (Native HTTP/2 Proxying with Header Guard)
 # =====================================================================
-location /videos/media/ts/1080/ {
-    # Why: Stream-One uses GET for downlink and POST for uplink; reject invalid methods early
+location ${xhttp_path} {
+    # Why: Header Guard intercepts unauthorized scanners or probing bots
+    # lacking the secret xPadding header, transparently routing them to the
+    # mask site (HTTP 200) instead of exposing Xray RST_STREAM or GOAWAY.
+    error_page 418 = @mask_fallback;
+${nginx_header_guard}
     if (\$request_method !~ ^(GET|POST)\$) {
-        return 404;
+        return 418;
     }
 
     # Why: Native HTTP/2 Cleartext (h2c) proxying without gRPC framing overhead
@@ -693,8 +915,8 @@ location /videos/media/ts/1080/ {
 
     # Headers for client IP forwarding
     proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Real-IP \$proxy_protocol_addr;
+    proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
     proxy_set_header X-Forwarded-Proto \$scheme;
 
     # Why: Enforce raw binary stream and prevent SSE/chunking distortions
@@ -706,36 +928,104 @@ location /videos/media/ts/1080/ {
     error_log /dev/null crit;
     gzip off;
 }
+
+# Why: Fallback handler for Header Guard to serve the legitimate mask application
+location @mask_fallback {
+    proxy_pass ${MASK_UPSTREAM};
+    proxy_ssl_server_name on;
+    proxy_ssl_name ${mask_hostname};
+    proxy_ssl_verify on;
+    proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+    proxy_http_version 1.1;
+    proxy_set_header Host ${mask_authority};
+    proxy_set_header X-Real-IP \$proxy_protocol_addr;
+    proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header Connection "";
+}
+
 	server_tokens off;
 	server_name ${domain};
-	listen unix:/dev/shm/nginx-http.sock ssl http2 proxy_protocol;
-	index index.html index.htm index.php index.nginx-debian.html;
-	root /var/www/html/;
+	listen unix:/dev/shm/nginx-http.sock ssl proxy_protocol;
+	http2 on;
 	ssl_protocols TLSv1.2 TLSv1.3;
-	ssl_ciphers HIGH:!aNULL:!eNULL:!MD5:!DES:!RC4:!ADH:!SSLv3:!EXP:!PSK:!DSS;
-	ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
-	ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
+	ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+	ssl_prefer_server_ciphers off;
+	ssl_certificate ${CERT_DIR}/fullchain.pem;
+	ssl_certificate_key ${CERT_DIR}/privkey.pem;
+	ssl_trusted_certificate ${CERT_DIR}/chain.pem;
+	ssl_stapling on;
+	ssl_stapling_verify on;
+	resolver 1.1.1.1 8.8.8.8 127.0.0.53 valid=300s;
+	resolver_timeout 5s;
 
-	# Security headers (anti-fingerprint)
+	# Security & anti-fingerprint headers (Enterprise CDN profile)
+	proxy_hide_header X-Powered-By;
+	add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 	add_header X-Content-Type-Options "nosniff" always;
 	add_header X-Frame-Options "SAMEORIGIN" always;
 	add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 	add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
 
-	# Rate limiting and probe log for Fail2ban
-	limit_req zone=probe_limit burst=20 nodelay;
-	access_log /var/log/nginx/probe.log probe_combined if=\$is_probe;
 	error_log /dev/null crit;
 
-	if (\$host !~* ^(.+\.)?$domain\$ ){return 444;}
-	if (\$scheme ~* https) {set \$safe 1;}
-	if (\$ssl_server_name !~* ^(.+\.)?$domain\$ ) {set \$safe "\${safe}0"; }
-	if (\$safe = 10){return 444;}
-	if (\$request_uri ~ "(\"|'|\`|\\$|&&|\?\?|0x00|0X00|\||\\|\{|\}|\[|\]|<|>|\.\.\.|\.\.\/|\/\/\/)"){set \$hack 1;}
-	error_page 400 401 402 403 500 501 502 503 504 =404 /404;
-	proxy_intercept_errors on;
+	include /etc/nginx/snippets/vpn-script-panel.conf;
+	include /etc/nginx/snippets/includes.conf;
+}
 
-	#X-UI Admin Panel
+# Why: Anti-loop fallback server for Xray REALITY / Steal-Oneself.
+# Avoids infinite routing loops by serving mask site directly on an isolated internal port.
+server {
+	listen 127.0.0.1:${ANTILOOP_PORT} ssl;
+	server_name ${domain};
+	ssl_certificate ${CERT_DIR}/fullchain.pem;
+	ssl_certificate_key ${CERT_DIR}/privkey.pem;
+	ssl_protocols TLSv1.2 TLSv1.3;
+	ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+	ssl_prefer_server_ciphers off;
+
+	location / {
+		proxy_pass ${MASK_UPSTREAM};
+		proxy_ssl_server_name on;
+		proxy_ssl_name ${mask_hostname};
+		proxy_ssl_verify on;
+		proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+		proxy_http_version 1.1;
+		proxy_set_header Host ${mask_authority};
+		proxy_set_header Connection "";
+	}
+
+	access_log off;
+	error_log /dev/null crit;
+}
+EOF
+
+cat > "/etc/nginx/snippets/includes.conf" << EOF
+location / {
+    proxy_pass ${MASK_UPSTREAM};
+    proxy_ssl_server_name on;
+    proxy_ssl_name ${mask_hostname};
+    proxy_ssl_verify on;
+    proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+    proxy_http_version 1.1;
+    proxy_set_header Host ${mask_authority};
+    proxy_set_header X-Real-IP \$proxy_protocol_addr;
+    proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header Connection "";
+}
+EOF
+
+
+# Existing workers are reloaded without the panel route before the backend starts.
+: > /etc/nginx/snippets/vpn-script-panel.conf
+ln -sfn "/etc/nginx/sites-available/${domain}" "/etc/nginx/sites-enabled/${domain}"
+nginx -t
+systemctl reload-or-restart nginx.service
+
+publish_panel_route() {
+    cat > /etc/nginx/snippets/vpn-script-panel.conf << EOF
+
 	location = /${panel_path} {
 		return 301 /${panel_path}/;
 	}
@@ -745,120 +1035,77 @@ location /videos/media/ts/1080/ {
 		proxy_set_header Upgrade \$http_upgrade;
 		proxy_set_header Connection "upgrade";
 		proxy_set_header Host \$host;
-		proxy_set_header X-Real-IP \$remote_addr;
-		proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+		proxy_set_header X-Real-IP \$proxy_protocol_addr;
+		proxy_set_header X-Forwarded-For \$proxy_protocol_addr;
 		proxy_set_header X-Forwarded-Proto https;
-		proxy_ssl_verify off;
 
 		proxy_read_timeout 3600s;
 		proxy_send_timeout 3600s;
-		proxy_pass https://127.0.0.1:${panel_port};
+		proxy_pass http://127.0.0.1:${panel_port};
 	}
 
-	include /etc/nginx/snippets/includes.conf;
-}
-
-# Why: Anti-loop fallback server for Xray REALITY / Steal-Oneself.
-# Avoids infinite routing loops by serving mask site directly on an isolated internal port.
-server {
-	listen 127.0.0.1:${ANTILOOP_PORT} ssl;
-	server_name ${domain};
-	ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
-	ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
-	ssl_protocols TLSv1.2 TLSv1.3;
-	ssl_ciphers HIGH:!aNULL:!eNULL:!MD5:!DES:!RC4:!ADH:!SSLv3:!EXP:!PSK:!DSS;
-
-	location / {
-		root /var/www/html/;
-		index index.html index.htm;
-	}
-
-	access_log off;
-	error_log /dev/null crit;
-}
 EOF
-
-cat > "/etc/nginx/snippets/includes.conf" << EOF
-	location / { try_files \$uri \$uri/ =404; }
-EOF
-
-##################################Check Nginx status####################################################
-if [[ -f "/etc/nginx/sites-available/${domain}" ]]; then
-	rm -f "/etc/nginx/sites-enabled/default" "/etc/nginx/sites-available/default"
-	ln -sf "/etc/nginx/sites-available/${domain}" "/etc/nginx/sites-enabled/" 2>/dev/null
-	ln -sf "/etc/nginx/sites-available/80.conf" "/etc/nginx/sites-enabled/" 2>/dev/null
-else
-	msg_err "${domain} nginx config not exist!" && exit 1
-fi
-
-if [[ $(nginx -t 2>&1 | grep -o 'successful') != "successful" ]]; then
-    echo "--- NGINX CONFIG ERROR DIAGNOSTIC ---" >&2
-    nginx -t >&2 || true
-    echo "--------------------------------------" >&2
-    msg_err "nginx config is not ok!" && exit 1
-else
-	systemctl start nginx 2>/dev/null || service nginx start 2>/dev/null || true
-fi
+    if [[ "$XHTTP_DOWNLOAD_PATH" != none ]]; then
+        render_xhttp_download >> /etc/nginx/snippets/vpn-script-panel.conf
+    fi
+    nginx -t
+    systemctl reload-or-restart nginx.service
+}
 
 ########################################Update X-UI Port/Path for first INSTALL#########################
 UPDATE_XUIDB(){
-if [[ -f "$XUIDB" ]]; then
-        systemctl stop x-ui 2>/dev/null || true
-        # Why: Restrict directory and database permissions so non-root users cannot read sensitive credentials/tokens
-        chmod 700 /etc/x-ui
-        chmod 600 /etc/x-ui/x-ui.db* 2>/dev/null || true
-        XRAY_BIN=$(xray_bin)
-        [[ -x "$XRAY_BIN" ]] || { msg_err "Xray binary not found: $XRAY_BIN"; return 1; }
-        client_id=$("$XRAY_BIN" uuid)
-        emoji_flag=$(LC_ALL=C curl -fsS --max-time 10 https://ipwho.is/ | jq -r '.flag.emoji // ""' || true)
-        [[ "$emoji_flag" == "null" ]] && emoji_flag=""
-        vlessenc_output=$("$XRAY_BIN" vlessenc 2>/dev/null || true)
-        vless_decryption=$(echo "$vlessenc_output" | grep '"decryption":' | tail -n 1 | sed 's/.*"decryption": "\(.*\)".*/\1/' || true)
-        vless_encryption=$(echo "$vlessenc_output" | grep '"encryption":' | tail -n 1 | sed 's/.*"encryption": "\(.*\)".*/\1/' || true)
-        [[ -z "$vless_decryption" ]] && vless_decryption="none"
-        [[ -z "$vless_encryption" ]] && vless_encryption="none"
-        sql_domain=$(sql_escape "$domain")
-        sql_emoji_flag=$(sql_escape "$emoji_flag")
-       	sqlite3 "$XUIDB" <<EOF
-		 INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("subClashEnable",  'false');
-		 INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("subEnableRouting",  'false');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("subEnable",  'false');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("webListen",  '127.0.0.1');
-	     INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("webDomain",  '');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("webCertFile",  '');
-	     INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("webKeyFile",  '');
-       	     INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("sessionMaxAge",  '60');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("pageSize",  '50');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("expireDiff",  '0');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("trafficDiff",  '0');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("remarkModel",  '-ieo');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("tgBotEnable",  'false');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("tgBotToken",  '');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("tgBotProxy",  '');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("tgBotAPIServer",  '');
-	     INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("tgBotChatId",  '');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("tgRunTime",  '@daily');
-	     INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("tgBotBackup",  'false');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("tgBotLoginNotify",  'true');
-	     INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("tgCpu",  '80');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("tgLang",  'en-US');
-	     INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("timeLocation",  'Europe/Moscow');
-             INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("secretEnable",  'false');
-	     INSERT OR REPLACE INTO "settings" ("key", "value") VALUES ("datepicker",  'gregorian');
+    [[ -f "$XUIDB" ]] || { deployment_error "Panel database is missing"; return 1; }
+    chmod 700 /etc/x-ui
+    chmod 600 "$XUIDB"
+    XRAY_BIN=$(xray_bin)
+    [[ -x "$XRAY_BIN" ]] || { deployment_error "Xray binary is missing"; return 1; }
+    client_id=$("$XRAY_BIN" uuid)
+    hy2_auth=$(gen_random_string 32)
+    vlessenc_output=$("$XRAY_BIN" vlessenc)
+    vless_decryption=$(printf '%s\n' "$vlessenc_output" | sed -n 's/.*"decryption": "\([^"]*\)".*/\1/p' | tail -1)
+    vless_encryption=$(printf '%s\n' "$vlessenc_output" | sed -n 's/.*"encryption": "\([^"]*\)".*/\1/p' | tail -1)
+    if [[ -z "$vless_encryption" || -z "$vless_decryption" ]]; then
+        deployment_error "Cannot derive VLESS client and server encryption"
+        return 1
+    fi
+    local status inbound_count
+    status=$(/usr/local/x-ui/x-ui setting -show 2>"$DEPLOYMENT/panel-errors")
+    if [[ -s "$DEPLOYMENT/panel-errors" ]] || ! grep -Eq '^hasDefaultCredential: (true|false)$' <<< "$status"; then
+        deployment_error "Cannot verify existing panel credentials"
+        return 1
+    fi
+    if [[ ! -f "$DEPLOYMENT/x-ui.db" ]] || grep -Fxq 'hasDefaultCredential: true' <<< "$status"; then
+        /usr/local/x-ui/x-ui setting -username "$config_username" -password "$config_password" >"$DEPLOYMENT/panel-settings" 2>&1
+        [[ "$(sqlite3 -batch -bail -readonly "$XUIDB" 'SELECT username FROM users ORDER BY id LIMIT 1;')" == "$config_username" ]] ||
+            { deployment_error "Panel credential update did not take effect"; return 1; }
+    else
+        config_username=""
+        config_password=""
+    fi
+    status=$(/usr/local/x-ui/x-ui setting -show 2>"$DEPLOYMENT/panel-errors")
+    if [[ -s "$DEPLOYMENT/panel-errors" ]] || ! grep -Fxq 'hasDefaultCredential: false' <<< "$status"; then
+        deployment_error "Panel still has standard credentials"
+        return 1
+    fi
+    sqlite3 -batch -bail "$XUIDB" <<EOF
+BEGIN IMMEDIATE;
+DELETE FROM settings WHERE key IN ('subClashEnable','subEnableRouting','subEnable','webListen','webPort','webBasePath','webDomain','webCertFile','webKeyFile');
+INSERT INTO settings (key,value) VALUES
+    ('subClashEnable','false'), ('subEnableRouting','false'), ('subEnable','false'),
+    ('webListen','127.0.0.1'), ('webPort','$panel_port'), ('webBasePath','/$panel_path/'),
+    ('webDomain',''), ('webCertFile',''), ('webKeyFile','');
+COMMIT;
 EOF
-
-        inbound_count=$(sqlite3 "$XUIDB" "SELECT count(*) FROM inbounds;" 2>/dev/null || echo "0")
+    inbound_count=$(sqlite3 -batch -bail -readonly "$XUIDB" 'SELECT count(*) FROM inbounds;')
         if [[ "$inbound_count" -eq 0 ]]; then
-            sqlite3 "$XUIDB" <<EOF
-             DELETE FROM "client_traffics";
-             DELETE FROM "inbounds";
-	     INSERT INTO "client_traffics" ("inbound_id","enable","email","up","down","expiry_time","total","reset") VALUES ('1','1','firstX','0','0','0','0','0');
+            sqlite3 -batch -bail "$XUIDB" <<EOF
+BEGIN IMMEDIATE;
       INSERT INTO "inbounds" ("user_id","up","down","total","remark","enable","expiry_time","listen","port","protocol","settings","stream_settings","tag","sniffing") VALUES ( 
              '1',
 	     '0',
              '0',
 	     '0',
-             '${sql_emoji_flag} xhttp',
+             'xhttp',
 	     '1',
              '0',
 	     '127.0.0.1',
@@ -868,7 +1115,6 @@ EOF
   "clients": [
     {
       "id": "${client_id}",
-      "flow": "xtls-rprx-vision",
       "email": "firstX",
       "limitIp": 0,
       "totalGB": 0,
@@ -896,28 +1142,26 @@ EOF
     }
   ],
   "xhttpSettings": {
-    "path": "/videos/media/ts/1080/",
+    "path": "${xhttp_path}",
     "host": "${domain}",
     "mode": "stream-one",
     "xPaddingBytes": "128-1120",
     "xPaddingObfsMode": true,
-    "xPaddingKey": "X-Amz-Meta-Trace",
-    "xPaddingHeader": "X-Amz-Security-Token",
+    "xPaddingKey": "${x_padding_key}",
+    "xPaddingHeader": "${x_padding_header}",
     "xPaddingPlacement": "header",
     "xPaddingMethod": "tokenish",
     "sessionIDPlacement": "header",
-    "sessionIDKey": "x-amz-cf-id",
+    "sessionIDKey": "${session_id_key}",
     "sessionIDTable": "Base62",
     "sessionIDLength": "16-32",
     "seqPlacement": "header",
-    "seqKey": "x-amz-cf-pop",
+    "seqKey": "${seq_key}",
     "scMaxBufferedPosts": 30,
     "scStreamUpServerSecs": "20-80",
     "uplinkHTTPMethod": "POST",
-    "enableXmux": true,
     "xmux": {
-      "maxConcurrency": "0",
-      "maxConnections": "1-3",
+      "maxConcurrency": 16,
       "cMaxReuseTimes": "300-600",
       "hMaxRequestTimes": "1000-2000",
       "hMaxReusableSecs": "1200-2400",
@@ -934,24 +1178,22 @@ EOF
 }',
              'in-${xhttp_port}-tcp',
 	     '{
-  "enabled": false,
+  "enabled": true,
   "destOverride": [
     "http",
     "tls",
-    "quic",
-    "fakedns"
+    "quic"
   ],
   "metadataOnly": false,
   "routeOnly": false
 }'
 	     );
-	     INSERT INTO "client_traffics" ("inbound_id","enable","email","up","down","expiry_time","total","reset") VALUES ('2','1','firstHy2','0','0','0','0','0');
       INSERT INTO "inbounds" ("user_id","up","down","total","remark","enable","expiry_time","listen","port","protocol","settings","stream_settings","tag","sniffing") VALUES ( 
              '1',
 	     '0',
              '0',
 	     '0',
-             '${sql_emoji_flag} hysteria2',
+             'hysteria2',
 	     '1',
              '0',
 	     '0.0.0.0',
@@ -959,10 +1201,10 @@ EOF
 	     'hysteria',
              '{
   "version": 2,
-  "auth": "${client_id}",
+  "auth": "${hy2_auth}",
   "users": [
     {
-      "auth": "${client_id}",
+      "auth": "${hy2_auth}",
       "email": "firstHy2",
       "enable": true
     }
@@ -970,7 +1212,7 @@ EOF
   "clients": [
     {
       "id": "${client_id}",
-      "auth": "${client_id}",
+      "auth": "${hy2_auth}",
       "email": "firstHy2",
       "limitIp": 0,
       "totalGB": 0,
@@ -998,18 +1240,18 @@ EOF
     "minVersion": "1.3",
     "certificates": [
       {
-        "certificateFile": "/root/cert/${domain}/fullchain.pem",
-        "keyFile": "/root/cert/${domain}/privkey.pem"
+        "certificateFile": "${CERT_DIR}/fullchain.pem",
+        "keyFile": "${CERT_DIR}/privkey.pem"
       }
     ]
   },
   "hysteriaSettings": {
     "version": 2,
-    "auth": "${client_id}",
+    "auth": "${hy2_auth}",
     "udpIdleTimeout": 60,
     "masquerade": {
       "type": "proxy",
-      "url": "http://127.0.0.1:80",
+      "url": "${MASK_UPSTREAM}",
       "rewriteHost": true
     }
   },
@@ -1022,728 +1264,220 @@ EOF
 }',
              'in-443-udp',
 	     '{
-  "enabled": false,
+  "enabled": true,
   "destOverride": [
     "http",
     "tls",
-    "quic",
-    "fakedns"
+    "quic"
   ],
   "metadataOnly": false,
   "routeOnly": false
 }'
 	     );
+INSERT INTO clients (email,uuid,sub_id,enable,created_at,updated_at) VALUES
+    ('firstX','$client_id','$(gen_random_string 24)',1,strftime('%s','now')*1000,strftime('%s','now')*1000);
+INSERT INTO clients (email,uuid,auth,sub_id,enable,created_at,updated_at) VALUES
+    ('firstHy2','$client_id','$hy2_auth','$(gen_random_string 24)',1,strftime('%s','now')*1000,strftime('%s','now')*1000);
+INSERT INTO client_inbounds (client_id,inbound_id,created_at)
+    SELECT c.id,i.id,strftime('%s','now')*1000 FROM clients c JOIN inbounds i
+        ON (c.email='firstX' AND i.tag='in-${xhttp_port}-tcp') OR (c.email='firstHy2' AND i.tag='in-443-udp');
+INSERT INTO client_traffics (inbound_id,enable,email,up,down,expiry_time,total,reset)
+    SELECT ci.inbound_id,1,c.email,0,0,0,0,0 FROM client_inbounds ci JOIN clients c ON c.id=ci.client_id
+    WHERE c.email IN ('firstX','firstHy2');
+COMMIT;
 EOF
-        else
-            msg_inf "Existing inbounds detected ($inbound_count). Preserving users and keys."
-        fi
-
-        # Ensure any existing or newly created Hysteria 2 inbounds are bound to 0.0.0.0 and have externalProxy/serverName configured
-        if sqlite3 "$XUIDB" "SELECT 1 FROM inbounds WHERE protocol='hysteria' LIMIT 1;" 2>/dev/null | grep -q 1; then
-            python3 -c "
-import sqlite3, json, sys
-db, domain = sys.argv[1], sys.argv[2]
-conn = sqlite3.connect(db)
-cursor = conn.cursor()
-cursor.execute(\"SELECT id, stream_settings FROM inbounds WHERE protocol='hysteria'\")
-rows = cursor.fetchall()
-for inbound_id, stream_settings_raw in rows:
-    try:
-        data = json.loads(stream_settings_raw) if stream_settings_raw else {}
-        data['externalProxy'] = [{'forceTls': 'tls', 'dest': domain, 'port': 443, 'remark': ''}]
-        if 'tlsSettings' not in data:
-            data['tlsSettings'] = {}
-        data['tlsSettings']['serverName'] = domain
-        cursor.execute(\"UPDATE inbounds SET listen='0.0.0.0', stream_settings=? WHERE id=?\", (json.dumps(data), inbound_id))
-    except Exception:
-        pass
-conn.commit()
-conn.close()
-" "$XUIDB" "$domain" 2>/dev/null || true
-        fi
-/usr/local/x-ui/x-ui setting -username "${config_username}" -password "${config_password}" -port "${panel_port}" -webBasePath "${panel_path}"
-/usr/local/x-ui/x-ui cert -webCert "/root/cert/${domain}/fullchain.pem" -webCertKey "/root/cert/${domain}/privkey.pem"
-# Why: Re-enforce strict directory and database permissions following CLI configuration updates
-chmod 700 /etc/x-ui
-chmod 600 /etc/x-ui/x-ui.db* 2>/dev/null || true
-systemctl restart x-ui 2>/dev/null || true
-else
-	msg_err "x-ui.db file not exist! Maybe x-ui isn't installed." && exit 1;
-fi
-}
-##############################Upgrade Xray-core to latest##############################################
-upgrade_xray_core() {
-    local XRAY_LATEST TMP_DIR XRAY_ASSET TARGET
-    XRAY_LATEST=$(curl -fsS --max-time 15 "https://api.github.com/repos/XTLS/Xray-core/releases/latest" 2>/dev/null | jq -r '.tag_name // empty' 2>/dev/null || true)
-    if [[ -z "$XRAY_LATEST" ]]; then
-        msg_err "Failed to fetch latest Xray-core version (rate limit or network error). Keeping existing binary."
-        return 0
     fi
-
-    case "$(arch)" in
-        amd64) XRAY_ASSET="Xray-linux-64.zip" ;;
-        386) XRAY_ASSET="Xray-linux-32.zip" ;;
-        arm64) XRAY_ASSET="Xray-linux-arm64-v8a.zip" ;;
-        armv7) XRAY_ASSET="Xray-linux-arm32-v7a.zip" ;;
-        s390x) XRAY_ASSET="Xray-linux-s390x.zip" ;;
-        armv5|armv6)
-            msg_err "Xray automatic upgrade is not supported for $(arch). Install a compatible Xray binary manually."
-            return 0
-            ;;
-        *) msg_err "Unsupported Xray architecture: $(arch)"; return 0 ;;
-    esac
-
-    TARGET="$(xray_bin)"
-    [[ -n "$TARGET" ]] || return 0
-
-    msg_inf "Upgrading Xray-core to ${XRAY_LATEST} (${XRAY_ASSET})..."
-    TMP_DIR=$(mktemp -d)
-    trap 'rm -rf "$TMP_DIR"' RETURN
-
-    if ! curl -fL --retry 3 --connect-timeout 10 --max-time 120 -o "${TMP_DIR}/xray.zip" "https://github.com/XTLS/Xray-core/releases/download/${XRAY_LATEST}/${XRAY_ASSET}" 2>/dev/null; then
-        msg_err "Failed to download Xray-core archive. Keeping existing binary."
-        return 0
-    fi
-
-    unzip -tqq "${TMP_DIR}/xray.zip" || { msg_err "Corrupted Xray zip archive. Keeping existing binary."; return 0; }
-    unzip -o "${TMP_DIR}/xray.zip" xray -d "${TMP_DIR}/extract" >/dev/null
-    install -m 0755 "${TMP_DIR}/extract/xray" "$TARGET"
-
-    systemctl restart x-ui 2>/dev/null || true
-    msg_ok "Xray-core updated to ${XRAY_LATEST}"
-}
-##############################RU-Block (Outbound block for RU resources)################################
-apply_ru_block() {
-    msg_inf "Configuring RU-Block (Outbound block for RU resources)..."
-
-    # Backup database
-    if [[ -f "$XUIDB" ]]; then
-        cp "$XUIDB" "${XUIDB}.backup_ru"
-        msg_ok "Database backed up to ${XUIDB}.backup_ru"
-        # Why: Restrict permissions on database backup file immediately upon creation
-        chmod 700 /etc/x-ui
-        chmod 600 /etc/x-ui/x-ui.db* 2>/dev/null || true
-    fi
-
-    # Download latest geo databases
-    msg_inf "Downloading latest geo databases (geosite_RU.dat, geoip.dat, geosite.dat)..."
-    mkdir -p /usr/local/x-ui/bin
-    curl -fsSL --connect-timeout 10 --max-time 60 "https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download/geosite.dat" -o /usr/local/x-ui/bin/geosite_RU.dat 2>/dev/null || true
-    curl -fsSL --connect-timeout 10 --max-time 60 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -o /usr/local/x-ui/bin/geoip.dat 2>/dev/null || true
-    curl -fsSL --connect-timeout 10 --max-time 60 "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" -o /usr/local/x-ui/bin/geosite.dat 2>/dev/null || true
-    ln -sf /usr/local/x-ui/bin/geoip.dat /usr/local/x-ui/bin/geoip_IR.dat
-
-    if [[ ! -s /usr/local/x-ui/bin/geosite_RU.dat ]]; then
-        msg_err "geosite_RU.dat is missing or empty. Skipping RU-Block rule injection to prevent Xray startup crash."
-        return 0
-    fi
-
-    # Inject RU-Block rule, outbounds and DNS/hosts via Python
-    python3 - << 'PYEOF'
-import sqlite3
+    python3 - "$XUIDB" "$xhttp_port" "$xhttp_path" "$x_padding_key" "$x_padding_header" \
+        "$session_id_key" "$seq_key" "$domain" "$CERT_DIR" "$MASK_UPSTREAM" <<'PYTHON'
 import json
+import sqlite3
 import sys
 
-db_path = "/etc/x-ui/x-ui.db"
-try:
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT value FROM settings WHERE key = 'xrayTemplateConfig'")
-    row = cursor.fetchone()
-
-    if row and row[0]:
-        try:
-            config = json.loads(row[0])
-        except Exception:
-            config = {}
-    else:
-        config = {}
-
-    # 1. Outbounds (direct and blocked)
-    if "outbounds" not in config or not isinstance(config["outbounds"], list) or len(config["outbounds"]) == 0:
-        config["outbounds"] = [
-            {
-                "protocol": "freedom",
-                "tag": "direct",
-                "settings": {
-                    "domainStrategy": "UseIP"
-                }
-            },
-            {
-                "protocol": "blackhole",
-                "tag": "blocked",
-                "settings": {}
-            }
-        ]
-    else:
-        existing_tags = [o.get("tag") for o in config["outbounds"] if isinstance(o, dict)]
-        if "direct" not in existing_tags:
-            config["outbounds"].append({
-                "protocol": "freedom",
-                "tag": "direct",
-                "settings": {"domainStrategy": "UseIP"}
-            })
-        if "blocked" not in existing_tags:
-            config["outbounds"].append({
-                "protocol": "blackhole",
-                "tag": "blocked",
-                "settings": {}
-            })
-
-    # 2. DNS & Hosts
-    if "dns" not in config or not isinstance(config["dns"], dict):
-        config["dns"] = {
-            "servers": [
-                "https+local://1.1.1.1/dns-query",
-                "1.1.1.1",
-                "8.8.8.8",
-                "localhost"
-            ],
-            "hosts": {
-                "domain:googleapis.cn": "googleapis.com"
-            }
-        }
-    else:
-        if "servers" not in config["dns"] or not config["dns"]["servers"]:
-            config["dns"]["servers"] = [
-                "https+local://1.1.1.1/dns-query",
-                "1.1.1.1",
-                "8.8.8.8",
-                "localhost"
-            ]
-        if "hosts" not in config["dns"] or not config["dns"]["hosts"]:
-            config["dns"]["hosts"] = {
-                "domain:googleapis.cn": "googleapis.com"
-            }
-
-    # 3. Routing rules
-    user_rules = [
-        {
-            "type": "field",
-            "inboundTag": ["api"],
-            "outboundTag": "api"
-        },
-        {
-            "type": "field",
-            "enabled": True,
-            "domain": ["ext:geosite_RU.dat:ru-blocked-all"],
-            "ip": ["geoip:ru", "ext:geoip_IR.dat:ru"],
-            "outboundTag": "blocked"
-        },
-        {
-            "type": "field",
-            "ip": ["geoip:private"],
-            "outboundTag": "blocked"
-        },
-        {
-            "type": "field",
-            "protocol": ["bittorrent"],
-            "outboundTag": "blocked"
-        },
-        {
-            "type": "field",
-            "enabled": True,
-            "port": "443",
-            "network": "udp",
-            "outboundTag": "blocked"
-        }
+db, port, path, pad_key, pad_header, session_key, seq_key, domain, cert_dir, mask = sys.argv[1:]
+with sqlite3.connect(db) as conn:
+    conn.execute("BEGIN IMMEDIATE")
+    vless, = conn.execute(
+        "SELECT id, stream_settings FROM inbounds WHERE protocol='vless' AND enable=1 "
+        "AND port=? AND json_extract(stream_settings,'$.network')='xhttp'", (port,)
+    ).fetchall()
+    hysteria, = conn.execute(
+        "SELECT id, stream_settings FROM inbounds WHERE protocol IN ('hysteria','hysteria2') "
+        "AND enable=1 AND port=443 AND json_extract(settings,'$.version')=2"
+    ).fetchall()
+    vless_stream = json.loads(vless[1])
+    xhttp = vless_stream["xhttpSettings"]
+    xhttp["path"] = path
+    for name, value in (
+        ("xPaddingKey", pad_key), ("xPaddingHeader", pad_header),
+        ("sessionIDKey", session_key), ("seqKey", seq_key)
+    ):
+        if value:
+            xhttp[name] = value
+        elif name in xhttp and not xhttp[name]:
+            xhttp.pop(name, None)
+    if isinstance(xhttp.get("xmux"), dict) and xhttp["xmux"].get("maxConcurrency"):
+        xhttp["xmux"].pop("maxConnections", None)
+    conn.execute("UPDATE inbounds SET listen='127.0.0.1', stream_settings=? WHERE id=?",
+                 (json.dumps(vless_stream), vless[0]))
+    stream = json.loads(hysteria[1])
+    stream["externalProxy"] = [{"forceTls": "tls", "dest": domain, "port": 443, "remark": ""}]
+    stream["tlsSettings"]["serverName"] = domain
+    stream["tlsSettings"]["certificates"] = [
+        {"certificateFile": f"{cert_dir}/fullchain.pem", "keyFile": f"{cert_dir}/privkey.pem"}
     ]
-
-    if "routing" not in config or not isinstance(config["routing"], dict):
-        config["routing"] = {}
-    config["routing"]["domainStrategy"] = "IPIfNonMatch"
-
-    current_rules = config["routing"].get("rules", [])
-    filtered_rules = [
-        r for r in current_rules
-        if not (
-            r.get("outboundTag") in ["block", "blocked"] and (
-                "geoip:ru" in r.get("ip", []) or
-                "ext:geosite_RU.dat:ru-blocked-all" in r.get("domain", []) or
-                "geosite:ru" in r.get("domain", []) or
-                "geosite:category-ru" in r.get("domain", []) or
-                "bittorrent" in r.get("protocol", []) or
-                (r.get("port") == "443" and r.get("network") == "udp") or
-                r.get("ip") == ["geoip:private"]
-            )
-        ) and not (r.get("inboundTag") == ["api"] and r.get("outboundTag") == "api")
-    ]
-    config["routing"]["rules"] = user_rules + filtered_rules
-
-    cursor.execute("SELECT 1 FROM settings WHERE key = 'xrayTemplateConfig'")
-    if cursor.fetchone():
-        cursor.execute("UPDATE settings SET value = ? WHERE key = 'xrayTemplateConfig'", (json.dumps(config, indent=2),))
-    else:
-        cursor.execute("INSERT INTO settings (key, value) VALUES ('xrayTemplateConfig', ?)", (json.dumps(config, indent=2),))
-
-    conn.commit()
-    conn.close()
-    print("RU-Block, Outbounds and Hosts injected successfully.")
-except Exception as e:
-    print(f"Error injecting RU-Block rule: {e}", file=sys.stderr)
-    sys.exit(1)
-PYEOF
-
-    # Why: Enforce strict directory and database permissions after RU-Block rules injection
-    chmod 700 /etc/x-ui
-    chmod 600 /etc/x-ui/x-ui.db* 2>/dev/null || true
-
-    # Restart x-ui to apply
-    if systemctl is-active --quiet x-ui 2>/dev/null; then
-        systemctl restart x-ui 2>/dev/null || true
-    fi
-    msg_ok "RU-Block active. Rollback: cp ${XUIDB}.backup_ru ${XUIDB} && systemctl restart x-ui"
-}
-arch() {
-    case "$(uname -m)" in
-        x86_64 | x64 | amd64) echo 'amd64' ;;
-        i*86 | x86) echo '386' ;;
-        armv8* | armv8 | arm64 | aarch64) echo 'arm64' ;;
-        armv7* | armv7 | arm) echo 'armv7' ;;
-        armv6* | armv6) echo 'armv6' ;;
-        armv5* | armv5) echo 'armv5' ;;
-        s390x) echo 's390x' ;;
-        *) echo -e "${green}Unsupported CPU architecture! ${plain}" && rm -f install.sh && exit 1 ;;
-    esac
+    stream["hysteriaSettings"]["masquerade"] = {"type": "proxy", "url": mask, "rewriteHost": True}
+    conn.execute("UPDATE inbounds SET listen='0.0.0.0', stream_settings=? WHERE id=?",
+                 (json.dumps(stream), hysteria[0]))
+PYTHON
+    chmod 600 "$XUIDB"
 }
 
-xray_bin() {
-    case "$(arch)" in
-        amd64) printf '%s\n' '/usr/local/x-ui/bin/xray-linux-amd64' ;;
-        386)   printf '%s\n' '/usr/local/x-ui/bin/xray-linux-386' ;;
-        arm64) printf '%s\n' '/usr/local/x-ui/bin/xray-linux-arm64' ;;
-        armv7|armv6|armv5) printf '%s\n' '/usr/local/x-ui/bin/xray-linux-arm' ;;
-        s390x) printf '%s\n' '/usr/local/x-ui/bin/xray-linux-s390x' ;;
-        *) return 1 ;;
-    esac
-}
-
-config_after_install() {
-    # Do not expose or temporarily enable well-known default credentials.
-    /usr/local/x-ui/x-ui migrate
-    # Why: Restrict permissions immediately after migration initializes the database
-    chmod 700 /etc/x-ui 2>/dev/null || true
-    chmod 600 /etc/x-ui/x-ui.db* 2>/dev/null || true
-}
-
-install_panel() {
-apt-get update && apt-get install -y -q wget curl tar tzdata
-    cd /usr/local/
-    
-    # Download resources
-    if [ $# == 0 ]; then
-        tag_version=$(curl -Ls --max-time 15 "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || true)
-        if [[ ! -n "$tag_version" ]]; then
-            echo -e "${yellow}Trying to fetch version with IPv4...${plain}"
-            tag_version=$(curl -4 -Ls --max-time 15 "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || true)
-            if [[ ! -n "$tag_version" ]]; then
-                tag_version="v2.4.9"
-                echo -e "${yellow}GitHub API rate limit or network issue; using default stable version: ${tag_version}${plain}"
-            fi
-        fi
-        echo -e "Got x-ui latest version: ${tag_version}, beginning the installation..."
-        wget -N -O "/usr/local/x-ui-linux-$(arch).tar.gz" "https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz"
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Downloading x-ui failed, please be sure that your server can access GitHub ${plain}"
-            exit 1
-        fi
-    else
-        tag_version=$1
-        tag_version_numeric=${tag_version#v}
-        min_version="2.3.5"
-        
-        if [[ "$(printf '%s\n' "$min_version" "$tag_version_numeric" | sort -V | head -n1)" != "$min_version" ]]; then
-            echo -e "${red}Please use a newer version (at least v2.3.5). Exiting installation.${plain}"
-            exit 1
-        fi
-        
-        url="https://github.com/MHSanaei/3x-ui/releases/download/v${tag_version_numeric}/x-ui-linux-$(arch).tar.gz"
-        echo -e "Beginning to install x-ui $1"
-        wget -N -O /usr/local/x-ui-linux-$(arch).tar.gz ${url}
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Download x-ui $1 failed, please check if the version exists ${plain}"
-            exit 1
-        fi
-    fi
-    wget -O /usr/bin/x-ui-temp https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh
-    if [[ $? -ne 0 ]]; then
-        echo -e "${red}Failed to download x-ui.sh${plain}"
-        exit 1
-    fi
-    
-    # Stop x-ui service and remove old resources
-    if [[ -e /usr/local/x-ui/ ]]; then
-        if [[ $release == "alpine" ]]; then
-            rc-service x-ui stop
-        else
-            systemctl stop x-ui 2>/dev/null || true
-        fi
-        rm /usr/local/x-ui/ -rf
-    fi
-    
-    # Extract resources and set permissions
-    tar -zxf "x-ui-linux-$(arch).tar.gz"
-    rm x-ui-linux-$(arch).tar.gz -f
-    
-    cd x-ui
-    chmod +x x-ui
-    chmod +x x-ui.sh
-    
-    # Normalize legacy ARM binary name used by the panel.
-    if [[ "$(arch)" == "armv5" || "$(arch)" == "armv6" || "$(arch)" == "armv7" ]]; then
-        mv -f "bin/xray-linux-$(arch)" bin/xray-linux-arm
-    fi
-    chmod +x x-ui bin/xray-linux-$(arch)
-    
-    # Update x-ui cli and se set permission
-    mv -f /usr/bin/x-ui-temp /usr/bin/x-ui
-    chmod +x /usr/bin/x-ui
-	config_after_install
-    
-    if [[ $release == "alpine" ]]; then
-        wget --inet4-only -O /etc/init.d/x-ui https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.rc
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Failed to download x-ui.rc${plain}"
-            exit 1
-        fi
-        chmod +x /etc/init.d/x-ui
-        rc-update add x-ui
-    else
-        # Why: Enable service on startup, but do NOT start x-ui here.
-        # Defer starting until webListen='127.0.0.1' is written to the database to eliminate 0.0.0.0 bind race window.
-        cp -f x-ui.service.debian /etc/systemd/system/x-ui.service
-        systemctl daemon-reload 2>/dev/null || true
-        systemctl enable x-ui 2>/dev/null || true
-    fi
-    
-    echo -e "${green}x-ui ${tag_version}${plain} installation finished..."
-    echo -e ""
-    echo -e "┌───────────────────────────────────────────────────────┐
-│  ${blue}x-ui control menu usages (subcommands):${plain}              │
-│                                                       │
-│  ${blue}x-ui${plain}              - Admin Management Script          │
-│  ${blue}x-ui start${plain}        - Start                            │
-│  ${blue}x-ui stop${plain}         - Stop                             │
-│  ${blue}x-ui restart${plain}      - Restart                          │
-│  ${blue}x-ui status${plain}       - Current Status                   │
-│  ${blue}x-ui settings${plain}     - Current Settings                 │
-│  ${blue}x-ui enable${plain}       - Enable Autostart on OS Startup   │
-│  ${blue}x-ui disable${plain}      - Disable Autostart on OS Startup  │
-│  ${blue}x-ui log${plain}          - Check logs                       │
-│  ${blue}x-ui banlog${plain}       - Check Fail2ban ban logs          │
-│  ${blue}x-ui update${plain}       - Update                           │
-│  ${blue}x-ui legacy${plain}       - Legacy version                   │
-│  ${blue}x-ui install${plain}      - Install                          │
-│  ${blue}x-ui uninstall${plain}    - Uninstall                        │
-└───────────────────────────────────────────────────────┘"
-
-}
-
-######################Sysctl Kernel Tuning##############################################################
-apply_sysctl_tuning() {
-    # Why: Optimize Linux kernel for high-concurrency proxy workloads, UDP transport (Hysteria 2 / AWG),
-    # xHTTP streaming stall prevention, and routing forwarding.
-    cat > /etc/sysctl.d/99-xui-tuning.conf << 'SYSCTL'
-# --- Congestion control & queuing (BBR) ---
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-
-# --- File descriptors & filesystem watcher limits ---
-fs.file-max = 2097152
-fs.inotify.max_user_instances = 8192
-fs.inotify.max_user_watches = 524288
-
-# --- TCP connection handshake & backlog (prevents drops under high connection bursts) ---
-net.ipv4.tcp_timestamps = 1
-net.ipv4.tcp_sack = 1
-net.ipv4.tcp_window_scaling = 1
-net.core.somaxconn = 65535
-net.ipv4.tcp_max_syn_backlog = 65535
-net.core.netdev_max_backlog = 16384
-
-# --- TCP Fast Open (0-RTT client & server handshake) ---
-net.ipv4.tcp_fastopen = 3
-
-# --- TIME_WAIT recycling for rapid short-lived connection reuse ---
-net.ipv4.tcp_max_tw_buckets = 524288
-net.ipv4.tcp_tw_reuse = 1
-
-# --- Memory buffers for TCP and UDP (Hysteria 2 / AmneziaWG) ---
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
-net.ipv4.udp_mem = 65536 131072 262144
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
-
-# --- xHTTP stream stall prevention (reduces bufferbloat on active streams) ---
-net.ipv4.tcp_notsent_lowat = 16384
-
-# --- Path MTU discovery (prevents packet fragmentation bottlenecks) ---
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_mtu_probe_floor = 1024
-
-# --- Dirty page writeback latency reduction ---
-vm.dirty_ratio = 6
-vm.dirty_background_ratio = 3
-
-# --- IP forwarding for inbound/outbound tunneling ---
-net.ipv4.ip_forward = 1
-SYSCTL
-
-    sysctl --system 2>/dev/null || true
-}
-
-###################################Install X-UI#########################################################
-if [[ "${MODE}" == "node" ]]; then
-    # Node mode: install panel without master DB setup
-    if ! systemctl is-active --quiet x-ui 2>/dev/null; then
-        install_panel
-    fi
-    upgrade_xray_core || true
-    /usr/local/x-ui/x-ui setting -username "${config_username}" -password "${config_password}" -port "${panel_port}" -webBasePath "${panel_path}" 2>/dev/null || true
-    if [[ -f "$XUIDB" ]]; then
-        # Why: Ensure webListen is bound strictly to loopback interface on node instances
-        sqlite3 "$XUIDB" "INSERT OR REPLACE INTO \"settings\" (\"key\", \"value\") VALUES ('webListen', '127.0.0.1');"
-        # Why: Enforce strict permissions on panel directory and sqlite database files
-        chmod 700 /etc/x-ui
-        chmod 600 /etc/x-ui/x-ui.db* 2>/dev/null || true
-    fi
-    systemctl restart x-ui 2>/dev/null || true
-
-    # Why: Apply kernel network performance optimizations on node instances
-    apply_sysctl_tuning
-
-    # Why: Enforce firewall isolation on node instances, restricting panel port access to master node IP
-    if command -v ufw >/dev/null 2>&1; then
-        ufw default deny incoming || true
-        ufw default allow outgoing || true
-        ufw allow "${SSH_PORT:-22}/tcp" || true
-        ufw allow 80/tcp || true
-        ufw allow 443/tcp || true
-        ufw allow 443/udp || true
-        if [[ -n "${MASTER_IP}" ]]; then
-            ufw allow from "${MASTER_IP}" to any port "${panel_port}" proto tcp || true
-        fi
-        ufw --force enable || true
-    fi
-    setup_ssh_port
-
-    msg_inf "=== NODE DEPLOYMENT COMPLETE ==="
-    msg_inf "Node IP: ${IP4}"
-    msg_inf "Panel: https://${domain}/${panel_path}/"
-    echo -e "Username:  ${config_username}"
-    echo -e "Password:  ${config_password}"
-    if [[ -n "${MASTER_IP}" ]]; then
-        msg_inf "To add this node on Master (${MASTER_IP}):"
-        msg_inf "  Address: ${IP4}, Port: ${panel_port}"
-    fi
-    exit 0
-fi
-
-if [[ ! -f /usr/local/x-ui/x-ui ]]; then
-    install_panel
-fi
-
-XRAY_BIN=$(xray_bin)
-[[ -x "$XRAY_BIN" ]] || { msg_err "Xray binary is missing: $XRAY_BIN"; exit 1; }
+#######################################Install and check panel###############################
+install_panel
+install_geodata /usr/local/x-ui/bin
+install -d -m 700 /etc/x-ui
+deployment_prepare_database
+/usr/local/x-ui/x-ui migrate >"$DEPLOYMENT/panel-migrate.log" 2>&1
 UPDATE_XUIDB
-upgrade_xray_core || true
-if [[ "${BLOCK_RU}" == *"y"* ]]; then
-    apply_ru_block
+python3 "$LIB_DIR/reality.py" apply "$XUIDB" "$domain" "$REALITY_TARGET" \
+    "$DEPLOYMENT/reality-ports.json" "$(xray_bin)" "$xhttp_port" > "$DEPLOYMENT/inbounds.json"
+python3 "$LIB_DIR/xray_config.py" routing "$XUIDB" "$xhttp_port" "$BLOCK_RU" "$DNS_PROVIDER" "$ADOPT_LEGACY"
+python3 "$LIB_DIR/xray_config.py" validate "$XUIDB" "$xhttp_port" "$(xray_bin)" "$DEPLOYMENT/xray-check.json"
+systemctl enable x-ui.service
+systemctl start x-ui.service
+ready=n
+for ((attempt=0; attempt<20; attempt++)); do
+    if check_listener "$panel_port" t loopback x-ui &&
+        check_listener "$xhttp_port" t loopback xray &&
+        check_listener 443 u present xray; then
+        ready=y
+        break
+    fi
+    sleep 1
+done
+if [[ "$ready" != y ]]; then
+    deployment_error "Panel or VPN listener did not pass readiness checks"
+    exit 1
 fi
-if ! systemctl is-enabled --quiet x-ui 2>/dev/null; then
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl enable x-ui.service 2>/dev/null || true
+for reality_port in "${reality_ports[@]}"; do
+    check_listener "$reality_port" t loopback xray || { deployment_error 'REALITY listener is not ready or isolated'; exit 1; }
+done
+if [[ "$(sqlite3 -batch -bail -readonly "$XUIDB" "SELECT value FROM settings WHERE key='subEnable';")" != false ]]; then
+    deployment_error "Subscription server is enabled"
+    exit 1
 fi
-systemctl restart x-ui 2>/dev/null || true
-nginx -t
-systemctl restart nginx 2>/dev/null || true
+download_password=""
+install -m 600 /dev/null "$DEPLOYMENT/xhttp.json"
+python3 "$LIB_DIR/xray_config.py" xhttp-config "$XUIDB" "$domain" "$xhttp_port" > "$DEPLOYMENT/xhttp.json"
+"$(xray_bin)" run -test -c "$DEPLOYMENT/xhttp.json" >/dev/null 2>&1 ||
+    { deployment_error "Xray rejected the exported xHTTP client configuration"; exit 1; }
+publish_xhttp_file "$DEPLOYMENT/xhttp.json" "$XHTTP_CONFIG_PATH" root 0600
+if [[ "$XHTTP_DOWNLOAD_PATH" != none ]]; then prepare_xhttp_download; fi
+publish_panel_route
+panel_ready=n
+for attempt in {1..25}; do
+    if curl --noproxy '*' -fsS --max-time 3 --resolve "$domain:443:127.0.0.1" "https://$domain/$panel_path/" -o /dev/null 2>/dev/null; then
+        panel_ready=y
+        break
+    fi
+    sleep 0.2
+done
+[[ "$panel_ready" == y ]] || { deployment_error "Public panel route failed its readiness check"; exit 1; }
+if [[ "$XHTTP_DOWNLOAD_PATH" != none ]] && ! check_xhttp_download; then
+    deployment_error "xHTTP download did not enforce authentication or serve the expected file"
+    exit 1
+fi
+for retired_file in "${retired_files[@]}"; do rm -f -- "$retired_file"; done
+systemctl enable nginx.service
 
-######################enable bbr and tune system########################################################
-apply_sysctl_tuning
-
-# LimitNOFILE for Nginx
-mkdir -p /etc/systemd/system/nginx.service.d
-cat > /etc/systemd/system/nginx.service.d/override.conf << 'SYSD'
-[Service]
-LimitNOFILE=65535
-SYSD
-
-# LimitNOFILE for x-ui
-mkdir -p /etc/systemd/system/x-ui.service.d
-cat > /etc/systemd/system/x-ui.service.d/override.conf << 'SYSD'
-[Service]
-LimitNOFILE=65535
-SYSD
-
-systemctl daemon-reload 2>/dev/null || true
-
-# Logrotate for Nginx (aggressive: 3 days with compression)
-cat > /etc/logrotate.d/xui-nginx << 'LOGR'
-/var/log/nginx/*.log {
-    daily
-    rotate 3
-    missingok
-    notifempty
-    compress
-    delaycompress
-    sharedscripts
-    postrotate
-        [ -f /var/run/nginx.pid ] && kill -USR1 $(cat /var/run/nginx.pid) 2>/dev/null || true
-    endscript
-}
-LOGR
-
-
-
-
-#################################Fail2ban Configuration################################################
 setup_fail2ban() {
-    msg_inf "Configuring Fail2ban anti-probing, rate limiting, and SSH protection..."
-    mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d /var/log/nginx
-    touch /var/log/nginx/probe.log /var/log/auth.log
-    chmod 640 /var/log/nginx/probe.log /var/log/auth.log
-    chown www-data:adm /var/log/nginx/probe.log 2>/dev/null || true
+    msg_inf "Configuring Fail2ban SSH protection..."
+    mkdir -p /etc/fail2ban/jail.d
 
-    cat > /etc/fail2ban/filter.d/nginx-probe.conf << 'EOF'
-[Definition]
-failregex = ^<HOST> -.* "(GET|POST|HEAD|PUT|DELETE|CONNECT|OPTIONS).*" (400|401|403|404|429|444) .*
-ignoreregex =
-EOF
-
-    cat > /etc/fail2ban/jail.d/99-nginx-probe.local << 'EOF'
-[nginx-probe]
-enabled   = true
-port      = http,https
-filter    = nginx-probe
-logpath   = /var/log/nginx/probe.log
-maxretry  = 5
-findtime  = 60
-bantime   = 86400
-banaction = ufw
-EOF
-
-    local ssh_jail_port="${SSH_PORT:-22}"
+    local ssh_jail_port=all
+    install -d -m 755 /etc/fail2ban/jail.d
+    local f2b_backend=systemd
     cat > /etc/fail2ban/jail.d/99-sshd.local << EOF
 [sshd]
 enabled   = true
 port      = ${ssh_jail_port}
 filter    = sshd
-logpath   = /var/log/auth.log
+backend   = ${f2b_backend}
 maxretry  = 3
 findtime  = 600
 bantime   = 86400
-banaction = ufw
+banaction = iptables-allports
 EOF
 
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl enable fail2ban 2>/dev/null || true
-        systemctl restart fail2ban 2>/dev/null || true
-    elif command -v service >/dev/null 2>&1; then
-        service fail2ban restart 2>/dev/null || true
-    fi
+    fail2ban-client -t
+    systemctl enable fail2ban.service
+    systemctl restart fail2ban.service
 }
 setup_fail2ban
 
-######################install_fake_site#################################################################
-
-FAKE_SITE_TMP=$(mktemp -d)
-if wget -qO "$FAKE_SITE_TMP/repo.tar.gz" "https://github.com/mozaroc/3x-ui-pro/archive/refs/heads/main.tar.gz" \
-	&& tar -xzf "$FAKE_SITE_TMP/repo.tar.gz" -C "$FAKE_SITE_TMP" --strip-components=3 "3x-ui-pro-main/assets/fake-sites"; then
-	FAKE_SITES=("$FAKE_SITE_TMP"/site-*/)
-	FAKE_SITE="${FAKE_SITES[$((RANDOM % ${#FAKE_SITES[@]}))]}"
-	msg_inf "Random fake site template: $(basename "$FAKE_SITE")"
-	mkdir -p /var/www/html
-	rm -rf /var/www/html/*
-	cp -a "$FAKE_SITE". /var/www/html/
-	msg_ok "Fake site installed successfully!"
-else
-	msg_err "Failed to download fake site templates!"
-	# Fallback: generate a minimal corporate placeholder
-	mkdir -p /var/www/html
-	cat > /var/www/html/index.html << 'FAKEHTML'
-<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><title>Service Status</title>
-<style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f8f9fa;color:#495057;}
-.c{text-align:center;}.c h1{font-size:2rem;margin-bottom:.5rem;}.c p{color:#868e96;}</style></head>
-<body><div class="c"><h1>Service Operational</h1><p>All systems are running normally.</p></div></body>
-</html>
-FAKEHTML
+install -d -m 755 /usr/local/lib/vpn-script
+for helper in deployment.sh download.sh versions.conf ssh.sh xray_config.py reality.py release.sh certificate_probe.py probe-requirements.txt; do
+    if [[ "$LIB_DIR/$helper" != "/usr/local/lib/vpn-script/$helper" ]]; then
+        install -m 644 "$LIB_DIR/$helper" "/usr/local/lib/vpn-script/$helper"
+    fi
+done
+/usr/bin/python3 "$LIB_DIR/certificate_probe.py" "$domain" "$CERT_DIR/fullchain.pem"
+if [[ "$SCRIPT_DIR" != /usr/local/sbin ]]; then
+    install -m 755 "${BASH_SOURCE[0]}" /usr/local/sbin/vpn-script
 fi
-rm -rf "$FAKE_SITE_TMP"
+links=$(python3 "$LIB_DIR/xray_config.py" links "$XUIDB" "$domain" "$xhttp_port")
+ssh_current=$(ssh_migration_current_port)
 
-
-
-######################cronjob for ssl/reload service/cloudflareips######################################
-if command -v crontab >/dev/null 2>&1; then
-    crontab -l 2>/dev/null | grep -v "certbot\|x-ui\|cloudflareips" | crontab - 2>/dev/null || true
-    (crontab -l 2>/dev/null; echo '@daily x-ui restart > /dev/null 2>&1 && (systemctl reload nginx 2>/dev/null || /usr/sbin/nginx -s reload 2>/dev/null);') | crontab - 2>/dev/null || true
-    (crontab -l 2>/dev/null; echo '@monthly certbot renew --webroot -w /var/www/html --quiet && (systemctl reload nginx 2>/dev/null || /usr/sbin/nginx -s reload 2>/dev/null);') | crontab - 2>/dev/null || true
+##################################Publish the operation result###########################
+if [[ -z "$config_password" ]]; then
+    creds_source=""
+    if [[ -f "$STATE_DIR/credentials" ]]; then
+        creds_source="$STATE_DIR/credentials"
+    elif [[ -d "$DEPLOYMENT/files" && -f "$DEPLOYMENT/paths" ]]; then
+        creds_idx=$(awk -v target="$STATE_DIR/credentials" '$0 == target { print NR - 1 }' "$DEPLOYMENT/paths")
+        if [[ -n "$creds_idx" && -f "$DEPLOYMENT/files/$creds_idx" ]]; then
+            creds_source="$DEPLOYMENT/files/$creds_idx"
+        fi
+    fi
+    if [[ -n "$creds_source" ]]; then
+        saved_user=$(sed -n -E 's/^Username:[[:space:]]*(.*)$/\1/p' "$creds_source" | head -n1 || true)
+        saved_pass=$(sed -n -E 's/^Password:[[:space:]]*(.*)$/\1/p' "$creds_source" | head -n1 || true)
+        db_user=$(sqlite3 -batch -bail -readonly "$XUIDB" 'SELECT username FROM users ORDER BY id LIMIT 1;' 2>/dev/null || true)
+        if [[ -n "$saved_user" && -n "$saved_pass" && -n "$db_user" && "$saved_user" == "$db_user" ]]; then
+            config_username="$saved_user"
+            config_password="$saved_pass"
+        fi
+    fi
 fi
-##################################ufw###################################################################
-if command -v ufw >/dev/null 2>&1; then
-    ufw default deny incoming || true
-    ufw default allow outgoing || true
-    ufw allow "${SSH_PORT:-22}/tcp" || true
-    ufw allow 80/tcp || true
-    ufw allow 443/tcp || true
-    ufw allow 443/udp || true
-    ufw --force enable || true
-fi
-setup_ssh_port
-
-# Build direct client connection URI (VLESS xHTTP stream-one)
-if [[ -z "$client_id" && -f "$XUIDB" ]]; then
-    client_id=$(sqlite3 "$XUIDB" "SELECT json_extract(settings, '$.clients[0].id') FROM inbounds WHERE protocol='vless' LIMIT 1;" 2>/dev/null || true)
-fi
-if [[ -z "$vless_encryption" && -f "$XUIDB" ]]; then
-    vless_encryption=$(sqlite3 "$XUIDB" "SELECT json_extract(settings, '$.encryption') FROM inbounds WHERE protocol='vless' LIMIT 1;" 2>/dev/null || true)
-fi
-[[ -z "$vless_encryption" || "$vless_encryption" == "null" ]] && vless_encryption="none"
-[[ -z "$emoji_flag" ]] && emoji_flag=$(LC_ALL=C curl -fsS --max-time 10 https://ipwho.is/ | jq -r '.flag.emoji // ""' 2>/dev/null || true)
-[[ "$emoji_flag" == "null" ]] && emoji_flag=""
-
-CLIENT_VLESS_URL="vless://${client_id}@${domain}:443?type=xhttp&security=tls&encryption=${vless_encryption}&flow=xtls-rprx-vision&path=%2Fvideos%2Fmedia%2Fts%2F1080%2F&mode=stream-one&sni=${domain}#${emoji_flag}%20${domain}%20(xHTTP)"
-CLIENT_HY2_URL="hysteria2://${client_id}@${domain}:443?sni=${domain}&alpn=h3#${emoji_flag}%20${domain}%20(Hysteria2)"
-
-##################################Show Details##########################################################
-
-if systemctl is-active --quiet x-ui 2>/dev/null; then
-    clear
-    printf '0\n' | x-ui | grep --color=never -i ':' || true
-	msg_inf "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
-	nginx -T | grep -i 'ssl_certificate\|ssl_certificate_key'
-	msg_inf "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
-	certbot certificates | grep -i 'Path:\|Domains:\|Expiry Date:'
-
-#	msg_inf "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
-#	if [[ -n $IP4 ]] && [[ "$IP4" =~ $IP4_REGEX ]]; then 
-#		msg_inf "IPv4: http://$IP4:$PORT/$RNDSTR/"
-#	fi
-#	if [[ -n $IP6 ]] && [[ "$IP6" =~ $IP6_REGEX ]]; then 
-#		msg_inf "IPv6: http://[$IP6]:$PORT/$RNDSTR/"
-#	fi
-
-	msg_inf "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
-	msg_inf "X-UI Secure Panel: https://${domain}/${panel_path}/\n"
- 	echo -e "Username:  ${config_username} \n" 
-	echo -e "Password:  ${config_password} \n" 
-	if [[ "${SSH_PORT:-22}" != "22" ]]; then
-		msg_inf "SSH Hardened Port: ${SSH_PORT} (Connect with: ssh -p ${SSH_PORT} root@${domain})\n"
-	fi
-	msg_inf "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
-	msg_inf "Direct Client Connection (VLESS-xHTTP):"
-	echo -e "${CLIENT_VLESS_URL}\n"
-	msg_inf "Direct Client Connection (Hysteria 2 UDP Backup):"
-	echo -e "${CLIENT_HY2_URL}\n"
-	msg_inf "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -"
-	msg_inf "Please Save this Screen!!"	
-else
-	nginx -t && printf '0\n' | x-ui | grep --color=never -i ':'
-	msg_err "sqlite and x-ui to be checked, try on a new clean linux! "
-fi
-#################################################N-joy##################################################
+install -m 600 /dev/null "$STATE_DIR/credentials.new"
+{
+    printf 'Panel URL: https://%s/%s/\n' "$domain" "$panel_path"
+    if [[ -n "$config_password" ]]; then
+        printf 'Username: %s\nPassword: %s\n' "$config_username" "$config_password"
+    fi
+    if [[ -n "$download_password" ]]; then
+        printf 'xHTTP Download URL: https://%s%s\nxHTTP Download Username: xhttp\nxHTTP Download Password: %s\n' \
+            "$domain" "$XHTTP_DOWNLOAD_PATH" "$download_password"
+    fi
+    printf '%s\n' "$links"
+} > "$STATE_DIR/credentials.new"
+mv -f -- "$STATE_DIR/credentials.new" "$STATE_DIR/credentials"
+install -m 600 /dev/null "$STATE_DIR/config.json.new"
+python3 - "$domain" "$panel_port" "$panel_path" "$xhttp_port" "$ssh_current" "$BLOCK_RU" "${DNS_PROVIDER:-none}" "$REALITY_TARGET" "$MASK_UPSTREAM" "$XHTTP_CONFIG_PATH" "$XHTTP_DOWNLOAD_PATH" "$DEPLOYMENT/inbounds.json" <<'PYTHON' > "$STATE_DIR/config.json.new"
+import json
+import sys
+domain, panel_port, panel_path, xhttp_port, ssh_port, block_ru, dns_provider, reality_target, mask_upstream, export, download, inbounds_file = sys.argv[1:]
+print(json.dumps({
+    "domain": domain, "panel_port": int(panel_port), "panel_path": panel_path, "xhttp_port": int(xhttp_port),
+    "ssh_port": int(ssh_port), "block_ru": block_ru, "dns_provider": dns_provider, "hy2_port": 443,
+    "reality_target": reality_target, "mask_upstream": mask_upstream,
+    "xhttp_config_path": export, "xhttp_download_path": download, "inbounds": json.load(open(inbounds_file))
+}, indent=2))
+PYTHON
+mv -f -- "$STATE_DIR/config.json.new" "$STATE_DIR/config.json"
+python3 "$LIB_DIR/reality.py" audit "$XUIDB" "$STATE_DIR/config.json"
+deployment_write_owned "${managed_files[@]}"
+deployment_commit
+msg_ok "Deployment complete. Credentials and client links: $STATE_DIR/credentials"
+printf 'xHTTP client configuration: %s\n' "$XHTTP_CONFIG_PATH"
+if [[ "$SSH_PORT_EXPLICIT" == y ]]; then ssh_migration_setup "$SSH_PORT"; fi

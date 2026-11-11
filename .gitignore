@@ -3,6 +3,7 @@
 *.log
 
 # Backups and temporaries
+backups/
 *.bak
 *.bak_*
 *.tmp

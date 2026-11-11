@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 480" width="100%" height="100%">
   <title>3X-UI Architecture and Multi-Layer Packet Routing</title>
-  <desc>Detailed end-to-end packet flow from WAN ingress through Nginx Stream SNI-preread, RAM Unix domain socket, Xray-core inbounds, and RU-Block outbound filtering.</desc>
+  <desc>Six inbound profiles behind Nginx: Self and Classic each use RAW to xHTTP REALITY chains. Self ends at the local Nginx TLS socket; Classic ends at its remote TLS site. HTTPS routes to local backends and all six proxy profiles use managed outbound filtering.</desc>
   
   <defs>
     <!-- Background Gradient -->
@@ -95,7 +95,7 @@
       <text x="10" y="52" fill="#f87171" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">Fake/Missing SNI</text>
     </g>
 
-    <text x="16" y="288" fill="#64748b" font-family="monospace" font-size="10">UFW: Default Deny</text>
+    <text x="16" y="288" fill="#64748b" font-family="monospace" font-size="10">UFW: Managed Rules</text>
   </g>
 
   <!-- Ingress Arrows -->
@@ -114,17 +114,17 @@
       <text x="10" y="22" fill="#38bdf8" font-family="monospace" font-size="11" font-weight="bold">ssl_preread on</text>
       <text x="10" y="40" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">SNI Inspection</text>
       <text x="10" y="58" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">proxy_protocol on</text>
-      <text x="10" y="78" fill="#10b981" font-family="monospace" font-size="11">→ unix domain sock</text>
-      <text x="10" y="96" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">Zero-copy RAM pipe</text>
+      <text x="10" y="78" fill="#10b981" font-family="monospace" font-size="11">→ REALITY chains</text>
+      <text x="10" y="96" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">4 loopback listeners</text>
     </g>
 
     <g transform="translate(14, 168)">
       <rect width="162" height="118" rx="8" fill="#1c1917" stroke="#44403c" stroke-width="1" />
-      <text x="10" y="22" fill="#fb923c" font-family="monospace" font-size="11" font-weight="bold">Anti-Loop Fallback</text>
-      <text x="10" y="40" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Port: 9443 (Localhost)</text>
-      <text x="10" y="58" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">Xray Reality / Steal-Self</text>
-      <text x="10" y="78" fill="#fb923c" font-family="monospace" font-size="10">upstream reality_failover</text>
-      <text x="10" y="96" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">Auto mask site backup</text>
+      <text x="10" y="22" fill="#fb923c" font-family="monospace" font-size="11" font-weight="bold">REALITY CHAINS</text>
+      <text x="10" y="40" fill="#cbd5e1" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Self: RAW → xHTTP → TLS</text>
+      <text x="10" y="58" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">Classic: RAW → xHTTP</text>
+      <text x="10" y="78" fill="#fb923c" font-family="monospace" font-size="10">→ remote site TLS:443</text>
+      <text x="10" y="96" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">HTTPS backup: Unix socket</text>
     </g>
   </g>
 
@@ -152,7 +152,7 @@
       <text x="10" y="20" fill="#6ee7b7" font-family="monospace" font-size="10" font-weight="bold">LOCATION ROUTING</text>
       
       <!-- Branch A: xHTTP -->
-      <text x="10" y="40" fill="#38bdf8" font-family="monospace" font-size="10">/videos/media/ts/..</text>
+      <text x="10" y="40" fill="#38bdf8" font-family="monospace" font-size="10">/api/library/stream/..</text>
       <text x="10" y="54" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9">POST Stream (Zero-Log)</text>
 
       <!-- Branch B: Panel Admin -->
@@ -161,11 +161,11 @@
 
       <!-- Branch C: Fake Site -->
       <text x="10" y="116" fill="#cbd5e1" font-family="monospace" font-size="10">GET / (Root/Other)</text>
-      <text x="10" y="130" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9">/var/www/html (Fake)</text>
+      <text x="10" y="130" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9">MASK_UPSTREAM</text>
 
       <!-- Branch D: Exploit Hack -->
-      <text x="10" y="154" fill="#ef4444" font-family="monospace" font-size="10">Malicious URI (.. //)</text>
-      <text x="10" y="168" fill="#f87171" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9">TCP RST (HTTP 444)</text>
+      <text x="10" y="154" fill="#ef4444" font-family="monospace" font-size="10">Unknown / missing SNI</text>
+      <text x="10" y="168" fill="#f87171" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9">TLS handshake rejected</text>
     </g>
   </g>
 
@@ -185,7 +185,7 @@
       <rect width="186" height="58" rx="6" fill="#1e1b4b" stroke="#6366f1" stroke-width="1" />
       <text x="10" y="18" fill="#a5b4fc" font-family="monospace" font-size="10" font-weight="bold">XRAY VLESS xHTTP</text>
       <text x="10" y="34" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">h2c Cleartext :xhttp_port</text>
-      <text x="10" y="48" fill="#c7d2fe" font-family="monospace" font-size="9">vlessenc + X-Amz Tokens</text>
+      <text x="10" y="48" fill="#c7d2fe" font-family="monospace" font-size="9">Preserved path / header guard</text>
     </g>
 
     <!-- 3X-UI Admin Panel -->
@@ -208,7 +208,7 @@
     <g transform="translate(12, 222)">
       <rect width="186" height="74" rx="6" fill="#2d1515" stroke="#dc2626" stroke-width="1" />
       <text x="10" y="18" fill="#fca5a5" font-family="monospace" font-size="10" font-weight="bold">FAIL2BAN IDS</text>
-      <text x="10" y="34" fill="#fecaca" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Jail [nginx-probe] (5/60s)</text>
+      <text x="10" y="34" fill="#fecaca" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Systemd journal backend</text>
       <text x="10" y="48" fill="#fecaca" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">Jail [sshd] (3/600s)</text>
       <text x="10" y="64" fill="#ef4444" font-family="monospace" font-size="9">Action: UFW 24h Ban</text>
     </g>
@@ -229,8 +229,8 @@
       <rect width="154" height="110" rx="8" fill="#064e3b" stroke="#10b981" stroke-width="1.2" />
       <text x="10" y="22" fill="#a7f3d0" font-family="monospace" font-size="11" font-weight="bold">GLOBAL INTERNET</text>
       <text x="10" y="40" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="bold">Outbound: DIRECT</text>
-      <text x="10" y="58" fill="#d1fae5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">TCP BBR Congestion</text>
-      <text x="10" y="74" fill="#d1fae5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">TCP Fast Open (3)</text>
+      <text x="10" y="58" fill="#d1fae5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">Managed DNS Profiles</text>
+      <text x="10" y="74" fill="#d1fae5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10">Host network settings preserved</text>
       <text x="10" y="92" fill="#6ee7b7" font-family="monospace" font-size="10">Free &amp; Uncensored</text>
     </g>
 

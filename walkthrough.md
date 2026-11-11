@@ -1,0 +1,432 @@
+# Аудит развёртывания и настройки xHTTP — 2026-11-11
+
+HEAD `8e809b4ae36232249b5f16f1d18d2730de03e341` с незакоммиченными правками. Рабочая копия уже содержала изменения установщика, стендов и документации. Они сохранены. Код проверяется на Linux/amd64 в Docker 29.1.3. Проверки production в эту задачу не входят.
+
+## Что исправлено
+
+- `-mask_port` задаёт TCP-порт сервиса прикрытия для Nginx и Hysteria 2. Установщик сохраняет origin, проверяет его достижимость и исключает конфликт с портами управляемых служб.
+- `-xhttp_config_path` задаёт путь локального Xray JSON с правами 0600. `-xhttp_download_path` включает точный HTTPS-маршрут с отдельным паролем и `Cache-Control: private, no-store`. Повторный запуск сохраняет настройки. Перенос локального файла и отключение маршрута учитываются в журнале и списке управляемых ресурсов.
+- `ss` с ошибкой больше не трактуется как отсутствие слушателя. Проверяются владельцы сокета и loopback для внутренних портов. Интерактивный запуск предлагает текущий порт SSH.
+- На Debian 12 повторный прогон настоящего systemd поймал `Address already in use` при откате `ssh.socket` после перезагрузки. При смене набора слушателей сначала останавливается сокет, затем мастер sshd в режиме `KillMode=process`. Конфигурация перечитывается после закрытия старых дескрипторов, а действующие сессии сохраняются.
+- SQLite-снимок проверяется до удаления WAL и подмены БД. При повреждении снимка текущая БД и журнал остаются на месте. Регрессия подменяет снимок повреждённым файлом и проверяет сохранение БД.
+- Nginx анализируется после временного исключения заменяемых vhost. Ошибка `nginx -T` останавливает развёртывание. Общий перехват ошибок убран, чтобы панель, xHTTP и загрузка сохраняли свои HTTP-статусы.
+- Внешний стенд копирует исходники в контейнер перед установкой. В промежуточном запуске редактирование bind-монтированного файла во время исполнения Bash привело к exit 127. Повторный запуск с неизменной копией проверяет результат отдельно.
+
+## Контейнерная приёмка
+
+Проверены Ubuntu 22.04 (jammy), Ubuntu 24.04 (noble) и Debian 12 (bookworm). Очищенные журналы, точные ID образов и SHA256 исходников находятся в `/tmp/vpn-qa-20261111.xlTx8uI7/`. Интеграционные обёртки использовали `vpn-script-qa:CODENAME-amd64` с ID `9dd9990677f6`, `ea8932bdfdf1` и `0fb58421b0e5` соответственно. Полные ID, включая чистые и повторно собранные образы, записаны в `image-manifest.log`.
+
+| Проверка | Команда и параметры | Результат | Журналы |
+| :--- | :--- | :--- | :--- |
+| Синтаксис | `bash -n` для Shell и `python3 -m compileall -q` для lib/tests внутри Docker с `--network none` | PASS, exit 0 | `syntax-final.log`, повторная проверка Shell после исправления SSH |
+| Чистые образы и базовый сьют | `docker build --no-cache --platform linux/amd64 --build-arg BASE_IMAGE=… -f Dockerfile.test .`, затем пересборка с итоговым кодом SSH и `docker run --rm --network none` без bind исходников | PASS, exit 0 на трёх ОС | `builds.log`, `build-{jammy,noble,bookworm}.log`, `build-final-*.log`, `basic-final-*.log` |
+| Установщик и миграция | `QA_SKIP_BUILD=y bash tests/docker-matrix.sh`. Профили `fresh legacy legacy-default`, клиентские проверки включены, трассировка выключена. Для параллельных повторов `QA_IMAGES=ubuntu:24.04:noble` и `QA_IMAGES=debian:12:bookworm` | PASS по всем девяти профилям. Noble и bookworm exit 0. Jammy напечатал PASS, обёртка завершилась с exit 1 после остановки дублирующего noble-прогона | `matrix/`, `matrix-noble/`, `matrix-bookworm/`, `matrix-duplicate-stop.log` |
+| Дополнительный повтор после уточнения прав экспорта и проверок снимка | `QA_PROFILES=legacy-default QA_SKIP_BUILD=y bash tests/docker-matrix.sh` | PASS, exit 0 на трёх ОС | `final-supplement.log`, `matrix-final-supplement/` |
+| Настоящий systemd после правки SSH | `bash tests/docker-systemd.sh`, service и socket на трёх ОС. Дополнительно Debian 12 socket и адаптер `tests/ssh-smoke.sh` на трёх ОС | PASS, exit 0. Проверены вход на старом порту, подтверждение с нового порта и откат после загрузки | `systemd-accepted/`, `systemd-fixed-bookworm/`, `fixed-ssh-adapter-*.log` |
+| Отдельные сервер и клиент | `bash tests/docker-external.sh`, fresh и repeat, IPv4 и native IPv6 | PASS, exit 0 на трёх ОС. Проверены 401 без пароля, загрузка JSON с паролем и трафик через скачанный конфиг. Внутренние порты недоступны извне | `external-stable/` |
+| Итоговый diff | `git diff --check`, проверка новых исходников, прав файлов и утечек секретов | PASS, exit 0 | `final-source.sha256`, эта запись |
+
+Основная матрица переиспользовала подготовленные образы и проверила реальные Nginx, Xray и sshd с адаптерами системных служб. Отдельные systemd и external стенды работали с настоящим PID 1 и внутренней Docker-сетью. Исправленный внешний стенд проверял скачанный JSON напрямую через Xray. Отказ `ssh.socket` зафиксирован в `systemd-final/failure-boot.log`. Отдельный инфраструктурный сбой `systemd-fixed.log` был связан с асинхронным удалением контейнера Docker. Обёртка теперь ждёт освобождения имени перед следующим запуском.
+
+Живые DNS, внешний origin и выдача сертификата для домена оператора не проверялись. Стенды использовали собственные DNS, TLS-сертификаты и контролируемый сайт. Динамические проверки и правки production не выполнялись. Gemini в этой итерации не использовалась.
+
+# Приёмка реализации безопасности — 2026-11-08
+
+Статус: **PASS / DONE**. Пять оставшихся пунктов закрыты. Работа выполнена одним исполнителем, без делегирования; production и службы хоста не затронуты. Следующие разделы содержат отдельные документационные задачи и исторические результаты, которые не используются как доказательства этой приёмки.
+
+## Ревизия и изменения
+
+HEAD: `8e809b4ae36232249b5f16f1d18d2730de03e341`, плюс незакоммиченная рабочая копия. До начала уже существовал большой diff: .gitignore, AGENTS.md, Dockerfile.test, README.md, assets/readme/*.svg, interactive_test.sh, plan.md, run_interactive.sh, script.sh, test_script.sh; новые PROJECT_CONTEXT.md, audit.sh, implementation_plan.md, lib/, task.md, tests/, walkthrough.md. Пользовательские и параллельные документационные правки сохранены.
+
+Эта задача изменила `lib/deployment.sh`, `test_script.sh`, `tests/install-smoke.sh`, README.md, текст в assets/readme/architecture.svg и документы приёмки. Хеши проверенных исполняемых файлов: `/tmp/vpn-qa-final-evidence-20261108/vpn-final-static-manifest-20261108.txt`. Документы окончательно обновлены после тестов; исполняемый код после них не менялся.
+
+## Два установленных дефекта
+
+1. Исходный сценарий с предустановленной панелью падал после повреждённого артефакта. Проверка SHA256 правильно отвергала geoip.dat. Причина отказа восстановления — неполная fixture: образ распаковывал панель без unit-файла, адаптер разрешал запуск, а снимок закономерно записывал `x-ui.service missing missing`. Fixture теперь создаёт штатный unit и явно принимает существующий ресурс через dry-run/adopt_token. Холодная установка остаётся отдельным режимом. После артефакта проверяются неизменность geoip, клиенты, `PRAGMA integrity_check=ok`, аудит служб и, в клиентской матрице, реальная передача трафика.
+2. Полная матрица выявила дополнительную ошибку установщика: `ss -lu` показывает временные исходящие UDP-сокеты Xray как UNCONN. Откат ошибочно ожидал прежние случайные порты после перезапуска ядра. Диагностика подтвердила это на трёх ОС (54121/u, 34495/u и 44437/u). Снимок UDP теперь включает только объявленные inbound-порты фактического runtime config.json. Проверки постоянного UDP/443 и TCP-listeners сохранены. Регрессия моделирует входящий UDP/443 и исходящий UDP/54121: до исправления exit 1, после exit 0. Незавершённый откат SQLite теперь выводит свой журнал в smoke-тесте.
+
+README ссылается на датированные результаты вместо общего заявления о приёмке. В архитектурной иллюстрации удалено устаревшее обещание настройки TCP Fast Open: глобальные параметры хоста сохраняются.
+
+## Результаты окончательных проверок
+
+Дата всех проверок: 2026-11-08 (Europe/Moscow). Docker 29.1.3, linux/amd64; Ubuntu 22.04/jammy, Ubuntu 24.04/noble, Debian 12/bookworm.
+
+| Проверка | Покрытие | Результат / exit code | Очищенные журналы относительно каталога доказательств |
+| :--- | :--- | :--- | :--- |
+| Синтаксис и статическая проверка | Shell/Python, 24 локальные Markdown/HTML-ссылки, SVG XML, признаки ключей/токенов | PASS / 0 | vpn-final-static-manifest-20261108.txt, vpn-final-document-check-20261108.log |
+| Исходная предустановочная конфигурация Nginx | Три ОС: установка, повтор, TCP/QUIC-продление, артефакт, readonly/SIGKILL, отказ службы, восстановление, удаление | PASS / 0 для всех | vpn-final-stock-{jammy,noble,bookworm}-20261108.log |
+| Основная матрица | Три ОС × fresh/legacy/legacy-default; базовый сьют, SSH-адаптеры, реальные клиенты, DNS/RU/private IPv4/IPv6, отказы, восстановление | PASS / 0 для каждой ОС | vpn-final-{jammy,noble,bookworm}-20261108/ |
+| Настоящий systemd PID 1 | Три ОС × service/socket, новая SSH-сессия, отказ старого порта, persistent rollback после нового PID 1 | PASS / 0 | vpn-final-systemd-20261108/ |
+| Внешние клиенты | Три ОС × fresh/repeat; VLESS/Hysteria 2 и недоступность прямых backend-портов | PASS / 0 | vpn-final-external-20261108/ |
+| Окончательная сборка с нуля | Три BASE_IMAGE, --no-cache, настоящие загрузки, проверка закреплённых хешей | PASS / 0 для каждой ОС | vpn-final-build-{jammy,noble,bookworm}-20261108.log |
+| Базовый сьют из окончательных образов | Без bind исходников, --network none; все группы, включая новую UDP-регрессию | PASS / 0 для каждой ОС | vpn-final-image-basic-{jammy,noble,bookworm}-20261108.log |
+| Итоговый diff | git diff --check, сохранение пользовательских изменений, секреты, согласованность документации | PASS / 0 | Эта запись и статический манифест |
+
+Каталог очищенных доказательств: `/tmp/vpn-qa-final-evidence-20261108/` (временный локальный каталог, не коммитится). Секреты и клиентские URI редактируются при сохранении журналов; временные клиентские credentials/metadata и SSH-ключи этих запусков удалены. Тестовые credentials в fixtures синтетические; production-БД, сертификаты и ключи не использовались. Единственное первоначальное совпадение URI-сканера в исходниках оказалось регулярным выражением проверки утечек.
+
+Восстановленные службы проверены аудитом и listeners; БД — integrity_check и сохранением клиентов, миграции — также сохранением счётчиков и нестандартной учётки. Реальные клиенты повторно передают трафик после повреждённого артефакта и после отката отказа службы. TLS-продление проверяет фактические TCP/QUIC-сертификаты. Базовые проверки идут без сети/capabilities; интеграционные — во внутренней bridge-сети. Native systemd использует private cgroup namespace, SYS_ADMIN/NET_ADMIN и apparmor=unconfined по проверенной обёртке. Privileged, host network и bind корневого cgroup хоста не применялись.
+
+## Команды и образы
+
+Исходный сценарий для каждого CODENAME:
+
+```bash
+docker run --rm --network none \
+  --mount "type=bind,source=$PWD,target=/source,readonly" \
+  vpn-script-qa:CODENAME-amd64 \
+  bash -euc 'cp -a /source /tmp/source; bash /tmp/source/tests/install-smoke.sh'
+```
+
+Основная матрица запускалась отдельно для каждой ОС, чтобы не смешивать журналы:
+
+```bash
+QA_SKIP_BUILD=y QA_IMAGES=ubuntu:22.04:jammy QA_OUTPUT_DIR=/tmp/vpn-final-jammy-20261108 bash tests/docker-matrix.sh
+QA_SKIP_BUILD=y QA_IMAGES=ubuntu:24.04:noble QA_OUTPUT_DIR=/tmp/vpn-final-noble-20261108 bash tests/docker-matrix.sh
+QA_SKIP_BUILD=y QA_IMAGES=debian:12:bookworm QA_OUTPUT_DIR=/tmp/vpn-final-bookworm-20261108 bash tests/docker-matrix.sh
+QA_OUTPUT_DIR=/tmp/vpn-final-systemd-20261108 bash tests/docker-systemd.sh
+QA_OUTPUT_DIR=/tmp/vpn-final-external-20261108 bash tests/docker-external.sh
+```
+
+QA_PROFILES не переопределялся: fresh, legacy, legacy-default. TARGET_ARCH=amd64 определена Docker; QA_TRACE=n. Обёртка передаёт QA_CLIENT_TESTS=y и QA_COLD_INSTALL=y. Для предустановочного сценария эти переменные не задавались.
+
+Эти прогоны использовали **чисто пересобранные в первой серии** образы с read-only bind окончательных исходников; QA_SKIP_BUILD=y здесь означает повторное использование этих образов, а не сборку. Точные image ID:
+
+- jammy: `sha256:1ffe3c9e9f54808390beaae9ab6b8bec0c5f7e8755d61b6a6f0f26fee5c6c3c4`
+- noble: `sha256:f2c851b842fe8ec7e7b92488f4e2943a3a6dbc17e11fe3ff7d5d375b3f913de0`
+- bookworm: `sha256:6534235b97f17215d1bdda3e4e4c6ecd96e5ca43635412ca60e2ecb959b343f2`
+
+Прежние подготовленные образы сохранены под тегами `vpn-script-qa:prepared-CODENAME-20261108`. После исправления кода отдельно повторены **все три сборки с нуля**, включая финальный COPY lib/:
+
+```bash
+docker build --no-cache --platform linux/amd64 --build-arg BASE_IMAGE=ubuntu:22.04 -f Dockerfile.test -t vpn-script-qa:final-jammy-20261108 .
+docker build --no-cache --platform linux/amd64 --build-arg BASE_IMAGE=ubuntu:24.04 -f Dockerfile.test -t vpn-script-qa:final-noble-20261108 .
+docker build --no-cache --platform linux/amd64 --build-arg BASE_IMAGE=debian:12 -f Dockerfile.test -t vpn-script-qa:final-bookworm-20261108 .
+# Для каждого окончательного образа, без монтирования исходников:
+docker run --rm --network none vpn-script-qa:final-CODENAME-20261108
+```
+
+vpn-script-qa:final-jammy-20261108 sha256:cc4c56a985092e999d33a5dae98c2ff47122f45904145786ecbb90e58fb8d003 linux/amd64
+vpn-script-qa:final-noble-20261108 sha256:1a10f42b503d794d80d0293d33c3d137006fda1109e8601b7fa306321cbf138d linux/amd64
+vpn-script-qa:final-bookworm-20261108 sha256:f3a9b2fad5a55dc77d5b345f99bbc6f21f30385bd577a469c6bb62d6d73aa32f linux/amd64
+
+## Диагностические отказы и ограничения
+
+Первоначальные FAIL сохранены как диагностика, а не успешная приёмка: неполная fixture (`vpn-stock-repro-20261108.log`); отрицательный контроль UDP-регрессии (`vpn-udp-regression-before-20261108.log`). Сборки после прежнего GitHub 504 прошли без подмены артефактов кешем. Первый дополнительный запуск базового сьюта и install-smoke в одном контейнере загрязнял состояние; исправлена команда запуска — проверки разделены на отдельные контейнеры. Никакие проверки не отключены и контракт восстановления не ослаблен.
+
+SKIP: полная ARM64-матрица — ранее исключена оператором, поддержка не заявляется. N/A: production-доступ и перезагрузка ядра хоста — вне задачи. Native systemd проверяет повторный запуск контейнерного userspace, а не reboot хоста. Предупреждения OCSP ожидаемы для локальных самоподписанных сертификатов стенда; проверка TCP/QUIC fingerprint прошла. Сбой при чтении systemd bus в начале boot-loop — промежуточный этап загрузки; итоговые service/socket сценарии завершились с кодом 0.
+
+---
+
+# Делегирование Gemini — 2026-11-08
+
+В AGENTS.md добавлен предоставленный пользователем раздел о Gemini через `agy`, модели `gemini-3.8-flash-medium`, JSON-выводе, таймауте 180 секунд и одной повторной попытке. Общий запрет делегирования уточнён исключением для Gemini; ссылки на регламент в README.md и PROJECT_CONTEXT.md согласованы. Просмотр правок подтвердил сохранение требований защиты секретов и ответственности основной модели. Исходные пользовательские изменения сохранены. Динамические тесты, Docker image ID и приёмка кода — N/A: задача затрагивает только документацию. Gemini не вызывалась из-за малого объёма правки.
+
+---
+
+# Предыдущая задача: обновление правил разработки — 2026-11-08
+
+По прямому указанию пользователя закреплена работа одним агентом. Субагенты и делегирование через навыки или другие чаты запрещены; каталог ролей, обязательные handoff и агентские clearance удалены из регламента.
+
+AGENTS.md стал единым источником правил. PROJECT_CONTEXT.md и раздел 10 README согласованы с ним. Описаны текущие модули и стенды, проверки по типу задачи, права контейнеров, согласованные SQLite-снимки, изоляция IPv4/IPv6 и защита секретов. Ошибки QA отделены от отката рабочей копии и production. План plan.md и предыдущие итерации явно помечены историческими; их статусы не переоценивались.
+
+Проверка документации: `git diff --check` завершился с кодом 0; статическая проверка семи Markdown-файлов подтвердила наличие 20 локальных ссылок и закрытие блоков кода в актуальных разделах. Поиск требований делегирования подтвердил запрет субагентов в действующих правилах. Рабочая копия содержала незакоммиченные изменения до начала задачи; они сохранены. Динамические тесты и Docker image ID — N/A: исполняемые файлы не менялись в рамках этой задачи. Новая приёмка кода и проверка серверов не выполнялись.
+
+---
+
+# Предыдущая итерация безопасности — 2026-11-08
+
+> Исторический отчёт, сохранённый без повторной проверки. Упоминания «текущего состояния» и успешных прогонов ниже относятся к этой прошлой итерации, а не к новой приёмке рабочей копии.
+
+Изменения выполнялись последовательно. Установщик разделён на проверяемые этапы, добавлены журнал операций, согласованные SQLite-снимки, восстановление файлов/бинарников/служб, реестр владения и двухэтапный перенос SSH. Панель публикуется после проверки случайной либо сохранённой нестандартной учётки, loopback-сокетов и отключённых подписок. Секреты вынесены в файл `0600`.
+
+RU-домены и RU-IP блокируются независимыми правилами; ограничения фактического назначения задаются через `finalRules`. DNS-профили и экспорт URI читают сохранённую конфигурацию. Версии и хеши объединены в `lib/versions.conf`. `audit.sh` возвращает ошибку при обязательном FAIL и проверяет реальные TCP/QUIC-сертификаты.
+
+Проверено в Docker: синтаксис Bash/Python, базовые шесть групп поведения на трёх amd64 ОС; реальные подключения VLESS xHTTP и Hysteria 2, чистая/повторная установка, блокировки и переключение y→n, TLS-продление. Миграция реальной схемы 2.9.4 сохраняет нестандартную учётку, клиентов и счётчики. Повторный прогон текущего состояния завершился с кодом 0; журналы сохраняются в `/tmp/vpn-current-final`.
+
+При усилении проверки отката обнаружена необходимость ждать исходные слушатели после запуска служб; ожидание добавлено. Тестовый адаптер systemd исправлен для сохранения active/inactive. Успешный DoH проверяется локальным TLS/HTTP2-сервисом, отдельный режим обрывает TLS и проверяет резервный DNS.
+
+ARM64 исключена из текущей приёмки по указанию оператора. Базовый сьют Ubuntu 22.04 успел пройти под QEMU/PRoot; это не означает поддержку полной ARM64-матрицы. Экспериментальный генератор ARM-сборок удалён.
+
+Настоящий systemd PID 1 проверен в Docker на всех трёх amd64 ОС: сервисный и сокетный режимы SSH, подключение с отдельного контейнера, подтверждение нового порта и восстановление после нового запуска PID 1 с просроченным persistent-таймером. Стенд использует отдельный cgroup namespace, SYS_ADMIN для перемонтирования собственного cgroup, NET_ADMIN для правил и `apparmor=unconfined`; `--privileged`, сеть хоста и bind корневого cgroup хоста не используются. Это проверка повторной загрузки контейнерного userspace, а не перезагрузка ядра хоста. Повторяемая команда: `bash tests/docker-systemd.sh`.
+
+Настоящий установщик дополнительно прошёл на Ubuntu 24.04 с настоящими nginx/x-ui/fail2ban; аудит вернул 0, Fail2ban добавил и удалил контрольное правило iptables. Новые инъекции отказов проверяют неверный DNS, чужой слушатель, повреждённый артефакт, отказ записи SQLite и SIGKILL с восстановлением при следующем запуске. Проверены DoH-таймаут, выборочное применение провайдера и блокировки приватного/RU-IP после DNS. Отдельно проверено сохранение журнала и снимка при сбое отката.
+
+Нативная проверка выявила и исправила два дефекта SSH: удаление `/run/sshd` после остановки socket-activated службы и отсутствие автоматической синхронизации портов `ssh.socket` на старых ОС. Управляемый socket drop-in сохраняет эффективные адреса, использует отдельные IPv4/IPv6 слушатели и восстанавливается при откате. Для Nginx добавлены управляемые размеры HTTP-хешей при отсутствии явной настройки оператора; конфиг читается до создания map.
+
+GitHub возвращал 504 при пересборке; прогоны используют ранее собранные образы с закреплёнными компонентами и проверяемым кешем артефактов. Глобальные sysctl и автоматическое обновление ОС установщик не перенастраивает; лимиты служб задаются отдельными drop-in-файлами.
+
+Предыдущий полный прогон: Ubuntu 22.04, Ubuntu 24.04 и Debian 12 на amd64 прошли по шесть базовых групп, оба SSH-адаптера и оба установочных сценария (fresh/legacy). Подтверждены реальные VLESS/Hysteria 2 подключения, повторная установка, private IPv4/IPv6, RU-IP, RU-домен на зарубежном IP, UDP/443, y→n, успешный DoH и резервирование при обрыве TLS для трёх профилей, обновление TCP/QUIC-сертификатов, доступность после отката и сохранение чужих ресурсов при удалении. Журналы этой итерации: `/tmp/vpn-current-final`.
+
+Новые подтверждённые результаты: `/tmp/vpn-systemd-acceptance` — шесть native-systemd сценариев, включая отказ подтверждения со старого порта; `/tmp/vpn-external-acceptance` — шесть подключений отдельных клиентских контейнеров после fresh/repeat и недоступность прямых backend-портов; `/tmp/vpn-default-credential-acceptance` — миграция исходной схемы 2.9.4 с admin/admin на трёх ОС; `/tmp/vpn-ssh-faults.log` — ошибки UFW и применения SSH сохраняют прежний вход; `/tmp/vpn-recovery-tests.log` — сбой отката сохраняет журнал и целый снимок для повторного восстановления. Заключительные повторные прогоны текущего установщика: `/tmp/vpn-acceptance-stable` и `/tmp/vpn-legacy-regression`.
+
+Ниже сохранён исторический отчёт; старые заявления о количестве тестов и скрытности не подтверждают текущую реализацию.
+
+---
+
+# Исторический Walkthrough: Интеграция GeoHide DoH DNS и верификация Google AI
+
+**Дата:** 14 октября 2026 г.  
+**Серверы:**
+1. `13.143.193.207` (SSH порт `56924`, домен `mymusicdownload.verymad.net`)
+2. `194.76.168.20` (Алиас SSH: `nl_music`, порт `56924`, домен `mymusicdownload.verymad.net`)  
+**Статус:** `COMPLETED`  
+
+---
+
+## 1. Резервное копирование и безопасность
+Перед внесением изменений в соответствии с регламентом `AGENTS.md`:
+- **Сервер `13.143.193.207`:**
+  - Создан целостный снимок базы данных: `/etc/x-ui/x-ui.db.bak_1792002740`
+  - Проверка целостности SQLite: `PRAGMA integrity_check;` -> `ok`
+  - Сохранен снимок активной конфигурации Xray: `/etc/x-ui/config.json.bak`
+- **Сервер `194.76.168.20` (`nl_music`):**
+  - Создан целостный снимок базы данных: `/etc/x-ui/x-ui.db.bak_1792003351`
+  - Проверка целостности SQLite: `PRAGMA integrity_check;` -> `ok`
+  - Сохранен снимок активной конфигурации Xray: `/etc/x-ui/config.json.bak`
+
+---
+
+## 2. Внесенные изменения в конфигурацию Xray / 3X-UI
+
+### 2.1 Фиксация хоста (`Bootstrap Pinning`)
+В секцию `dns.hosts` обоих серверов добавлен статический IP:
+```json
+"hosts": {
+  "domain:googleapis.cn": "googleapis.com",
+  "eu.geohide.ru": "5.175.161.3"
+}
+```
+Это предотвращает циклическую задержку и исключает сбои при разрешении самого DoH-резолвера.
+
+### 2.2 Селективный DoH-резолвер (`dns.servers`)
+Настроен резолвер `https+local://eu.geohide.ru/dns-query` с привязкой исключительно к AI-доменам:
+```json
+{
+  "address": "https+local://eu.geohide.ru/dns-query",
+  "domains": [
+    "geosite:google-gemini",
+    "geosite:google-deepmind",
+    "geosite:openai",
+    "geosite:anthropic",
+    "domain:gemini.google.com",
+    "domain:aistudio.google.com",
+    "domain:generativelanguage.googleapis.com",
+    "domain:alkalimakersuite-pa.clients6.google.com",
+    "domain:makersuite.google.com",
+    "domain:bard.google.com",
+    "domain:deepmind.google",
+    "domain:deepmind.com",
+    "domain:labs.google",
+    "domain:notebooklm.google.com",
+    "domain:notebooklm.google",
+    "domain:ai.google.dev",
+    "domain:proactivebackend-pa.googleapis.com"
+  ],
+  "queryStrategy": "UseIPv4",
+  "skipFallback": false
+}
+```
+Весь остальной трафик идет через `1.1.1.1` и `8.8.8.8` без оверхеда.
+
+### 2.3 Выделенный Outbound `geohide_dns`
+В секцию `outbounds` добавлен выходной шлюз с форсированным IPv4 DNS-резолвингом:
+```json
+{
+  "tag": "geohide_dns",
+  "protocol": "freedom",
+  "settings": {
+    "domainStrategy": "UseIPv4"
+  },
+  "streamSettings": {
+    "sockopt": {
+      "domainStrategy": "UseIPv4"
+    }
+  }
+}
+```
+
+### 2.4 Правило маршрутизации (`routing.rules`)
+AI-трафик направляется в `geohide_dns`:
+```json
+{
+  "type": "field",
+  "enabled": true,
+  "domain": [ ... 17 AI-доменов ... ],
+  "outboundTag": "geohide_dns"
+}
+```
+
+### 2.5 Активация SNI Sniffing на входящих соединениях
+В боевых инбаундах на обоих серверах включен перехват SNI:
+- `13.143.193.207`: `in-34851-tcp` (VLESS-xHTTP) и `in-443-udp` (Hysteria 2).
+- `194.76.168.20`: `in-13806-tcp` (VLESS-xHTTP) и `in-443-udp` (Hysteria 2).
+```json
+"sniffing": {
+  "enabled": true,
+  "destOverride": ["http", "tls", "quic"],
+  "metadataOnly": false,
+  "routeOnly": false
+}
+```
+Благодаря этому домены корректно маршрутизируются через GeoHide даже в том случае, если клиентское устройство выполнило DNS-резолвинг на своей стороне.
+
+---
+
+## 3. Результаты верификации Google AI сервисов
+
+### 3.1 Сервер 1: `13.143.193.207`
+| Домен | Статус DoH | Прокси IP GeoHide | Код HTTP | Результат |
+| :--- | :--- | :--- | :---: | :---: |
+| `gemini.google.com` | `PROXY (UNBLOCKED)` | `45.13.237.213` | `200` | **PASS** (Полный рендер страницы) |
+| `aistudio.google.com` | `PROXY (UNBLOCKED)` | `5.175.161.3` | `302` | **PASS** (Редирект на консоль/авторизацию) |
+| `alkalimakersuite-pa.clients6.google.com` | `PROXY (UNBLOCKED)` | `31.25.239.132` | `302` | **PASS** (Бэкенд Gemini отвечает) |
+| `generativelanguage.googleapis.com` | `PROXY (UNBLOCKED)` | `5.175.161.3` | `404` | **PASS** (Штатный код корня API) |
+| `notebooklm.google.com` | `PROXY (UNBLOCKED)` | `31.25.239.132` | `301` | **PASS** |
+| `deepmind.google` | `PROXY (UNBLOCKED)` | `5.175.161.3` | `200` | **PASS** |
+| `labs.google` | `PROXY (UNBLOCKED)` | `5.175.161.3` | `200` | **PASS** |
+| `ai.google.dev` | `PROXY (UNBLOCKED)` | `5.175.161.40` | `200` | **PASS** |
+| `makersuite.google.com` | `PROXY (UNBLOCKED)` | `5.175.161.3` | `302` | **PASS** |
+| `bard.google.com` | `PROXY (UNBLOCKED)` | `5.175.161.3` | `301` | **PASS** |
+
+### 3.2 Сервер 2: `194.76.168.20` (`nl_music`)
+| Домен | Статус DoH | Прокси IP GeoHide | Код HTTP | Результат |
+| :--- | :--- | :--- | :---: | :---: |
+| `gemini.google.com` | `PROXY (UNBLOCKED)` | `5.175.161.3` | `200` | **PASS** (Полный рендер страницы) |
+| `aistudio.google.com` | `PROXY (UNBLOCKED)` | `143.20.64.192` | `302` | **PASS** (Редирект на консоль/авторизацию) |
+| `alkalimakersuite-pa.clients6.google.com` | `PROXY (UNBLOCKED)` | `5.175.161.40` | `302` | **PASS** (Бэкенд Gemini отвечает) |
+| `generativelanguage.googleapis.com` | `PROXY (UNBLOCKED)` | `143.20.64.192` | `404` | **PASS** (Штатный код корня API) |
+| `notebooklm.google.com` | `PROXY (UNBLOCKED)` | `31.25.239.132` | `301` | **PASS** |
+| `deepmind.google` | `PROXY (UNBLOCKED)` | `5.175.161.3` | `200` | **PASS** |
+| `labs.google` | `PROXY (UNBLOCKED)` | `45.13.237.213` | `200` | **PASS** |
+| `ai.google.dev` | `PROXY (UNBLOCKED)` | `5.175.161.3` | `200` | **PASS** |
+| `makersuite.google.com` | `PROXY (UNBLOCKED)` | `45.13.237.213` | `302` | **PASS** |
+| `bard.google.com` | `PROXY (UNBLOCKED)` | `5.175.161.3` | `301` | **PASS** |
+
+---
+
+## 4. Контроль безопасности и сетевых сокетов
+- На обоих серверах:
+  - `systemctl status x-ui`: `active (running)`, ядро Xray 26.10.10 инициализировано и работает стабильно.
+  - Внутренние порты Xray API (`62789`), xHTTP (`34851` на сервере 1, `13806` на сервере 2) и веб-панели слушают строго `127.0.0.1`.
+  - Утечек приватных портов во внешнюю сеть нет.
+
+
+---
+
+## 5. Аудит маскировки трафика и калиброванный чеклист
+
+### 5.1 Результаты проверки маскировки
+- **Сервер 1 (`13.143.193.207`):**
+  - Бэкенд маскировки: веб-приложение `Music Downloader & Tag Manager` активно на `127.0.0.1:3000` (PID 211230).
+  - Ответ на GET `/`: HTTP 200 с полной отдачей UI (Tailwind CSS, веб-интерфейс).
+  - Защита от зондов с чужим SNI: `ssl_reject_handshake on;` сбрасывает TCP/TLS соединение (код `000`).
+- **Сервер 2 (`194.76.168.20`):**
+  - Бэкенд маскировки: веб-приложение `Music Downloader & Tag Manager` активно на `127.0.0.1:8010` (PID 96368).
+  - Ответ на GET `/`: HTTP 200 с полной отдачей UI.
+
+### 5.2 Калиброванный аудит (`audit.sh`)
+Создан и протестирован скрипт `audit.sh` с автоопределением домена узла и устранением 4 ложных срабатываний:
+- `[3] Flow:` проверяет фактическое значение, пустая строка 3X-UI корректно трактуется как `OK`.
+- `[5] Реакция на чужой SNI:` сброс через `ssl_reject_handshake` (код 000) оценивается как `OK`.
+- `[6] Fail2ban:` учитывает встроенный джейл 3X-UI `3x-ipl`.
+- `[8, 12] Сертификаты и Hysteria:` автоопределяет домен (`musicdownloader.verymad.net` для Сервера 2).
+
+Оба сервера успешно прошли аудит через `audit.sh` с оценкой **25 из 25 пунктов** без ложных тревог.
+
+---
+
+## 6. Углубленный аудит по методологии Aster (Bufferbloat, AQM, TLS, xMux)
+Проведен полный сравнительный срез без внесения изменений на хостах:
+- **Выявлена критическая уязвимость Сервера 2:** Отсутствие директивы `ssl_reject_handshake on;` приводит к раскрытию боевого SSL-сертификата (`musicdownloader.verymad.net`) при сканировании с произвольным SNI.
+- **Общий пробел:** На обоих серверах отсутствует OCSP Stapling (маркер «самодельной VPN-ноды»).
+- **Сетевой стек:** BBR активен на обоих серверах; `fq_codel` на S1, `fq` на S2. Path MTU Discovery и ICMP работают корректно.
+- **Архитектурный дрейф:** S1 использует RAM-сокет `/dev/shm` и `proxy_http_version 2;`, S2 использует TCP-петлю `7443` и `grpc_pass`.
+- Полный структурированный отчет сохранен в артефакте `full_audit_report.md`.
+
+---
+
+## 7. Реализация исправлений на Сервере 2 (`musicdownloader.verymad.net`)
+1. **Резервное копирование:**
+   - `/etc/nginx.bak_1792007670`
+   - `/etc/x-ui/x-ui.db.bak_1792007670` (`PRAGMA integrity_check` -> `ok`).
+2. **Обновление Nginx до Mainline 1.31.7:**
+   - Подключен официальный репозиторий `nginx-mainline` (jammy), удалены устаревшие пакеты Ubuntu 1.18.0.
+   - Подтверждена поддержка `ssl_reject_handshake`, `proxy_http_version 2` и `http2 on;`.
+3. **Ликвидация демаскировки (Foreign SNI Leak):**
+   - Внедрен дефолтный сервер-заглушка `server { listen 127.0.0.1:7443 ssl default_server proxy_protocol; ssl_reject_handshake on; }`.
+   - Тест с произвольным SNI: `error:0A000458:SSL routines::tlsv1 unrecognized name` — сертификат больше не раскрывается сканерам.
+4. **Унификация xHTTP проксирования:**
+   - Заменен `grpc_pass` на чистый HTTP/2 Cleartext `proxy_http_version 2; proxy_pass http://127.0.0.1:13806;` с поддержкой методов `GET` и `POST`.
+5. **Безопасность и сьюты:**
+   - Деактивирован небезопасный регекс `location ~ ^/(?<fwdport>\d+)/` в `includes.conf`.
+   - Обновлены шифросьюты до профиля Mozilla Intermediate.
+   - Устранено устаревшее предупреждение директивы `listen ... http2` в пользу `http2 on;`.
+6. **Сетевой стек и xMux:**
+   - Перманентно активирован `net.ipv4.tcp_fastopen = 3` в `/etc/sysctl.d/99-tcp-fastopen.conf`.
+   - В SQLite БД обновлены параметры `xmux`: `maxConcurrency: 16`, `maxConnections: "2-4"` (устранение Head-of-Line Blocking).
+7. **Верификация:**
+   - 10 из 10 эндпоинтов Google AI возвращают `PASS`.
+   - Калиброванный чеклист `audit.sh`: 25 из 25 пунктов `OK/INFO`.
+
+---
+
+## 8. Модернизация Сервера 1 (`mymusicdownload.verymad.net`)
+1. **Резервное копирование:**
+   - `/etc/nginx.bak_1792008364`
+   - `/etc/x-ui/x-ui.db.bak_1792008364` (`PRAGMA integrity_check` -> `ok`).
+2. **Модернизация шифросьютов Nginx:**
+   - В основном виртуальном хосте и в fallback-сервере на порту 9443 устаревшие шифры `HIGH:...` заменены на профиль Mozilla Intermediate с поддержкой аппаратного ChaCha20-Poly1305.
+   - Проверка `nginx -t` успешна, выполнен `systemctl reload nginx`.
+3. **Тюнинг xMux в базе данных 3X-UI:**
+   - Параметры мультиплексирования инбаунда VLESS обновлены: `maxConcurrency: 16`, `maxConnections: "2-4"` (устранение Head-of-Line Blocking).
+   - Выполнен перезапуск `systemctl restart x-ui`, база проверена (`PRAGMA integrity_check` -> `ok`).
+4. **Итоговая верификация:**
+   - 10 из 10 эндпоинтов Google AI возвращают `PASS`.
+   - Калиброванный чеклист `audit.sh`: 25 из 25 пунктов `OK/INFO`.
+   - Все службы активны, оба сервера полностью синхронизированы по стандартам безопасности и производительности.
+
+---
+
+## 9. Кодификация в `script.sh` и комплексный пакет скрытности (Stealth Suite)
+
+**Дата:** 18 октября 2026 г.  
+**Область действия:** Кодовая база репозитория (`script.sh`, `test_script.sh`, `Dockerfile.test`).  
+**Статус:** `COMPLETED` (72 из 72 тестов PASS в Docker).
+
+### 9.1 Внедренные компоненты скрытности (Stealth Suite)
+1. **Nginx Header Guard для VLESS-xHTTP:**
+   - Добавлен перехват сканеров без авторизационного заголовка `$http_<x_padding_header>`:
+     `error_page 418 = @mask_fallback;`
+   - При отсутствии заголовка запрос прозрачно перенаправляется в `@mask_fallback` на реальное приложение маскировки (`${MASK_UPSTREAM}`).
+   - Сканеры и цензоры получают HTTP 200 реального сайта вместо сброса потока HTTP/2 (RST_STREAM / GOAWAY), делая путь туннеля полностью необнаружимым.
+2. **OCSP Stapling в Nginx:**
+   - Внедрены директивы `ssl_stapling on;`, `ssl_stapling_verify on;`, `ssl_trusted_certificate /etc/letsencrypt/live/$domain/chain.pem;` и `resolver 1.1.1.1 8.8.8.8 127.0.0.53 valid=300s;`.
+   - Гарантирована генерация `chain.pem` при получении или проверке сертификатов Let's Encrypt и в тестовых mock-сертификатах.
+   - Устранен маркер «самодельной VPN-ноды» в TLS Handshake (0 RTT).
+3. **Шифросьюты Mozilla Intermediate:**
+   - Полная замена устаревших шифров `HIGH:!aNULL...` на профиль Mozilla Intermediate с поддержкой ChaCha20-Poly1305 и `ssl_prefer_server_ciphers off;` в основном и antiloop блоках.
+4. **Enterprise CDN Security Headers:**
+   - `proxy_hide_header X-Powered-By;` (сокрытие бэкенд-фреймворка маскировки).
+   - `Strict-Transport-Security "max-age=31536000; includeSubDomains" always;` (HSTS).
+
+### 9.2 Кодификация инфраструктурных улучшений в `script.sh`
+1. **GeoHide DoH & Bootstrap Pinning:**
+   - В `xrayTemplateConfig` зафиксирован статический IP `eu.geohide.ru: 5.175.161.3`.
+   - Настроен DoH-резолвер `https+local://eu.geohide.ru/dns-query` для 17 AI-доменов (Gemini, Claude, ChatGPT, Deepmind).
+   - Добавлен выделенный outbound `geohide_dns` (`freedom`, `domainStrategy: UseIPv4`).
+   - Добавлено правило маршрутизации AI-трафика в `geohide_dns`.
+2. **Тюнинг VLESS Inbound и xMux:**
+   - `maxConcurrency: 16`, `maxConnections: "2-4"` (устранение Head-of-Line Blocking).
+   - Включен `sniffing` (`"enabled": true`, `"destOverride": ["http", "tls", "quic"]`) для xHTTP и Hysteria 2.
+
+### 9.3 Результаты тестирования в Docker
+- `Dockerfile.test` дополнен генерацией `chain.pem`.
+- Добавлены тесты 62–70 в `test_script.sh`.
+- Команда `docker build -f Dockerfile.test -t xui-test . && docker run --rm xui-test` завершилась со статусом:
+  ```
+  ==============================================
+    TEST RESULTS: 72 passed, 0 failed, 72 total
+  ==============================================
+  ```
+- Код возврата: `0`. Все тесты пройдены без единого сбоя.
+

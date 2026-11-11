@@ -1,1027 +1,521 @@
 #!/bin/bash
 
+if [[ ! -f /.dockerenv ]]; then
+    printf 'Run this suite inside Docker. It writes to container system paths.\n' >&2
+    exit 1
+fi
+
 PASS=0
 FAIL=0
-TOTAL=0
 
-pass() { echo -e "\e[1;42m PASS \e[0m $1"; ((PASS++)); ((TOTAL++)); }
-fail() { echo -e "\e[1;41m FAIL \e[0m $1"; ((FAIL++)); ((TOTAL++)); }
+pass() { printf 'PASS %s\n' "$1"; ((PASS+=1)); }
+fail() { printf 'FAIL %s\n' "$1"; ((FAIL+=1)); }
 
-echo "=============================================="
-echo "  Docker Test Suite for x-ui-pro.sh refactor"
-echo "=============================================="
-echo ""
+# Exercise the installer and helpers with real service binaries. Tests with
+# simulated service management are labeled separately from runtime checks.
+# --- Deployment behavior ---
+QA_ROOT=$(mktemp -d) || exit 1
+QA_INSTALLER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/script.sh"
+QA_DEPLOYMENT="$(dirname "$QA_INSTALLER")/lib/deployment.sh"
+trap 'rm -rf -- "$QA_ROOT"' EXIT
 
-# --- Test 1: Bash syntax check ---
-echo ">>> Test 1: Bash syntax check"
-if bash -n /script.sh 2>&1; then
-    pass "Bash syntax check passed"
-else
-    fail "Bash syntax check failed"
-fi
-echo ""
-
-# --- Test 2: Generate Nginx configs by sourcing relevant parts ---
-echo ">>> Test 2: Generate Nginx configs (simulated)"
-
-# Set variables as the script would
-domain="test.example.com"
-panel_path="secretpanel"
-panel_port="12301"
-xhttp_port="19842"
-
-# Simulate cert symlinks
-mkdir -p /root/cert/${domain}
-chmod 755 /root/cert/
-rm -f /root/cert/${domain}/*
-ln -sf /etc/letsencrypt/live/${domain}/fullchain.pem /root/cert/${domain}/fullchain.pem
-ln -sf /etc/letsencrypt/live/${domain}/privkey.pem /root/cert/${domain}/privkey.pem
-
-# Test 3: Symlinks work on second run (ln -sf)
-echo ">>> Test 3: Symlinks survive second run (ln -sf)"
-ln -sf /etc/letsencrypt/live/${domain}/fullchain.pem /root/cert/${domain}/fullchain.pem 2>&1
-if [ $? -eq 0 ]; then
-    pass "Symlinks ln -sf survived repeated creation"
-else
-    fail "Symlinks ln -sf failed on repeated creation"
-fi
-echo ""
-
-# Generate stream.conf
-mkdir -p /etc/nginx/stream-enabled
-cat > "/etc/nginx/stream-enabled/stream.conf" << EOF
-map \$ssl_preread_server_name \$sni_name {
-    hostnames;
-    ${domain}           www;
-    default              www;
-}
-
-upstream www {
-    server unix:/dev/shm/nginx-http.sock;
-}
-
-upstream reality_failover {
-    server 127.0.0.1:9443;
-    server unix:/dev/shm/nginx-http.sock backup;
-}
-
-server {
-    proxy_protocol on;
-    listen          443;
-    listen         [::]:443;
-    proxy_pass      \$sni_name;
-    ssl_preread     on;
-}
-EOF
-
-# Fix nginx.conf for stream
-cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak
-grep -xqFR "stream { include /etc/nginx/stream-enabled/*.conf; }" /etc/nginx/* 2>/dev/null || echo "stream { include /etc/nginx/stream-enabled/*.conf; }" >> /etc/nginx/nginx.conf
-if [[ -f /usr/lib/nginx/modules/ngx_stream_module.so ]] && ! grep -rq "ngx_stream_module" /etc/nginx/ 2>/dev/null; then
-    sed -i '1s/^/load_module \/usr\/lib\/nginx\/modules\/ngx_stream_module.so; /' /etc/nginx/nginx.conf
-fi
-# geoip2 module removed — not available on stock Ubuntu
-grep -xqFR "worker_rlimit_nofile 16384;" /etc/nginx/* 2>/dev/null || echo "worker_rlimit_nofile 16384;" >> /etc/nginx/nginx.conf
-sed -i "/worker_connections/c\worker_connections 4096;" /etc/nginx/nginx.conf
-grep -q "sites-enabled" /etc/nginx/nginx.conf || sed -i '/conf\.d\/\*\.conf;/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf
-
-# Ensure conf.d/*.conf is included and configure rate limiting and probe logging
-mkdir -p /etc/nginx/conf.d /var/log/nginx
-touch /var/log/nginx/probe.log
-chmod 640 /var/log/nginx/probe.log
-cat > "/etc/nginx/conf.d/probe_security.conf" << 'EOF'
-limit_req_zone $binary_remote_addr zone=probe_limit:10m rate=10r/s;
-limit_req_status 429;
-
-map $status $is_probe {
-    ~^[45]  1;
-    default 0;
-}
-
-log_format probe_combined '$remote_addr - $remote_user [$time_local] '
-                          '"$request" $status $body_bytes_sent '
-                          '"$http_referer" "$http_user_agent"';
-EOF
-
-# Generate 80.conf
-cat > "/etc/nginx/sites-available/80.conf" << EOF
-server {
-    listen 80;
-    server_name ${domain};
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
-}
-EOF
-
-# Generate main domain vhost
-cat > "/etc/nginx/sites-available/${domain}" << EOF
-# Why: Reject direct IP scans and TLS handshakes with missing/non-matching SNI,
-# preventing active probing and certificate disclosure on the unix domain socket.
-server {
-    listen unix:/dev/shm/nginx-http.sock ssl default_server proxy_protocol;
-    ssl_reject_handshake on;
-}
-
-server {
-# =====================================================================
-# VLESS XHTTP STREAM-ONE
-# =====================================================================
-location /videos/media/ts/1080/ {
-    # Why: Stream-One uses GET for downlink and POST for uplink; reject invalid methods early
-    if (\$request_method !~ ^(GET|POST)\$) {
-        return 404;
-    }
-
-    # Why: Native HTTP/2 Cleartext (h2c) proxying without gRPC framing overhead
-    proxy_http_version 2;
-    proxy_pass http://127.0.0.1:${xhttp_port:-19842};
-
-    # Why: Keepalive and zero-buffering for long-lived real-time streams
-    proxy_socket_keepalive on;
-    proxy_request_buffering off;
-    proxy_buffering off;
-    client_max_body_size 0;
-    proxy_read_timeout 1h;
-    proxy_send_timeout 1h;
-    client_body_timeout 1h;
-
-    # Headers for client IP forwarding
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-
-    # Why: Enforce raw binary stream and prevent SSE/chunking distortions
-    proxy_hide_header Content-Type;
-    add_header Content-Type application/octet-stream always;
-
-    access_log off;
-    error_log /dev/null crit;
-    gzip off;
-}
-	server_tokens off;
-	server_name ${domain};
-	listen unix:/dev/shm/nginx-http.sock ssl http2 proxy_protocol;
-	index index.html index.htm index.php index.nginx-debian.html;
-	root /var/www/html/;
-	ssl_protocols TLSv1.2 TLSv1.3;
-	ssl_ciphers HIGH:!aNULL:!eNULL:!MD5:!DES:!RC4:!ADH:!SSLv3:!EXP:!PSK:!DSS;
-	ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
-	ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
-
-	# Security headers (anti-fingerprint)
-	add_header X-Content-Type-Options "nosniff" always;
-	add_header X-Frame-Options "SAMEORIGIN" always;
-	add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-	add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
-
-	# Rate limiting and probe log for Fail2ban
-	limit_req zone=probe_limit burst=20 nodelay;
-	access_log /var/log/nginx/probe.log probe_combined if=\$is_probe;
-	error_log /dev/null crit;
-
-	if (\$host !~* ^(.+\.)?$domain\$ ){return 444;}
-	if (\$scheme ~* https) {set \$safe 1;}
-	if (\$ssl_server_name !~* ^(.+\.)?$domain\$ ) {set \$safe "\${safe}0"; }
-	if (\$safe = 10){return 444;}
-	if (\$request_uri ~ "(\"|'|\`|\\\$|&&|\?\?|0x00|0X00|\||\\\|\\{|\\}|\[|\]|<|>|\\.\\.\\.|\\.\\.\/|\/\/\/)"){set \$hack 1;}
-	error_page 400 401 402 403 500 501 502 503 504 =404 /404;
-	proxy_intercept_errors on;
-
-	#X-UI Admin Panel
-	location = /${panel_path} {
-		return 301 /${panel_path}/;
-	}
-
-	location /${panel_path}/ {
-		proxy_http_version 1.1;
-		proxy_set_header Upgrade \$http_upgrade;
-		proxy_set_header Connection "upgrade";
-		proxy_set_header Host \$host;
-		proxy_set_header X-Real-IP \$remote_addr;
-		proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-		proxy_set_header X-Forwarded-Proto https;
-		proxy_ssl_verify off;
-
-		proxy_read_timeout 3600s;
-		proxy_send_timeout 3600s;
-		proxy_pass https://127.0.0.1:${panel_port};
-	}
-
-	include /etc/nginx/snippets/includes.conf;
-}
-
-# Why: Anti-loop fallback server for Xray REALITY / Steal-Oneself.
-# Avoids infinite routing loops by serving mask site directly on an isolated internal port.
-server {
-	listen 127.0.0.1:9443 ssl;
-	server_name ${domain};
-	ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
-	ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
-	ssl_protocols TLSv1.2 TLSv1.3;
-	ssl_ciphers HIGH:!aNULL:!eNULL:!MD5:!DES:!RC4:!ADH:!SSLv3:!EXP:!PSK:!DSS;
-
-	location / {
-		root /var/www/html/;
-		index index.html index.htm;
-	}
-
-	access_log off;
-	error_log /dev/null crit;
-}
-EOF
-
-# Generate includes.conf
-cat > "/etc/nginx/snippets/includes.conf" << EOF
-	location / { try_files \$uri \$uri/ =404; }
-EOF
-
-# Enable sites
-rm -f /etc/nginx/sites-enabled/default
-ln -sf "/etc/nginx/sites-available/${domain}" "/etc/nginx/sites-enabled/"
-ln -sf "/etc/nginx/sites-available/80.conf" "/etc/nginx/sites-enabled/"
-
-# --- Test 4: nginx -t ---
-echo ">>> Test 4: nginx -t (config validation)"
-if nginx -t 2>&1; then
-    pass "nginx -t passed"
-else
-    fail "nginx -t failed"
-    nginx -t 2>&1 || true
-fi
-echo ""
-
-# --- Test 5: No geoip2 module in config ---
-echo ">>> Test 5: No geoip2 module in nginx config"
-if ! grep -r "ngx_stream_geoip2_module" /etc/nginx/ 2>/dev/null; then
-    pass "No geoip2 module reference found"
-else
-    fail "geoip2 module reference still present"
-fi
-echo ""
-
-# --- Test 6: No set_real_ip_from in stream config ---
-echo ">>> Test 6: No set_real_ip_from in stream config"
-if ! grep -r "set_real_ip_from" /etc/nginx/stream-enabled/ 2>/dev/null; then
-    pass "No set_real_ip_from in stream"
-else
-    fail "set_real_ip_from found in stream"
-fi
-echo ""
-
-# --- Test 7: Admin panel block has proxy_ssl_verify off ---
-echo ">>> Test 7: proxy_ssl_verify off in admin panel"
-if grep -q "proxy_ssl_verify off" "/etc/nginx/sites-available/${domain}"; then
-    pass "proxy_ssl_verify off present in domain vhost"
-else
-    fail "proxy_ssl_verify off missing in domain vhost"
-fi
-echo ""
-
-# --- Test 8: Absence of WS and gRPC locations in domain vhost ---
-echo ">>> Test 8: Absence of WS and gRPC locations in domain vhost"
-if ! grep -q "location /stream/ws/live/" "/etc/nginx/sites-available/${domain}" && \
-   ! grep -q "location /grpc-live-service" "/etc/nginx/sites-available/${domain}"; then
-    pass "WS and gRPC locations completely absent from domain vhost"
-else
-    fail "WS or gRPC location found in domain vhost"
-fi
-echo ""
-
-# --- Test 9: XHTTP location uses proxy_pass http://127.0.0.1: and proxy_http_version 2 ---
-echo ">>> Test 9: XHTTP location uses proxy_pass and proxy_http_version 2"
-if grep -q "proxy_pass http://127.0.0.1:" "/etc/nginx/sites-available/${domain}" && \
-   grep -q "proxy_http_version 2;" "/etc/nginx/sites-available/${domain}"; then
-    pass "XHTTP uses proxy_pass http://127.0.0.1: and proxy_http_version 2;"
-else
-    fail "XHTTP does not use proxy_pass http://127.0.0.1: or proxy_http_version 2;"
-fi
-echo ""
-
-# --- Test 10: XHTTP location path is /videos/media/ts/1080/ ---
-echo ">>> Test 10: XHTTP path is /videos/media/ts/1080/"
-if grep -q "location /videos/media/ts/1080/" "/etc/nginx/sites-available/${domain}"; then
-    pass "XHTTP path is /videos/media/ts/1080/"
-else
-    fail "XHTTP path is not /videos/media/ts/1080/"
-fi
-echo ""
-
-# --- Test 11: Security headers present ---
-echo ">>> Test 11: Security headers present"
-HEADERS_OK=true
-for hdr in "X-Content-Type-Options" "X-Frame-Options" "Referrer-Policy" "Permissions-Policy"; do
-    if ! grep -q "$hdr" "/etc/nginx/sites-available/${domain}"; then
-        HEADERS_OK=false
-        echo "  Missing: $hdr"
-    fi
-done
-if [ "$HEADERS_OK" = true ]; then
-    pass "All security headers present"
-else
-    fail "Some security headers missing"
-fi
-echo ""
-
-# --- Test 12: access_log off in vhost ---
-echo ">>> Test 12: access_log off in vhost"
-if grep -q "access_log off" "/etc/nginx/sites-available/${domain}"; then
-    pass "access_log off in domain vhost"
-else
-    fail "access_log off missing in domain vhost"
-fi
-echo ""
-
-# --- Test 13: SQLite DB settings (webListen and subscription disabled) ---
-echo ">>> Test 13: DB settings (webListen=127.0.0.1 and subEnable=false)"
-
-# Simulate what UPDATE_XUIDB does to settings
-XUIDB="/etc/x-ui/x-ui.db"
-sqlite3 $XUIDB << 'DBEOF'
-DELETE FROM settings WHERE key IN ('webListen', 'subEnable', 'subPort', 'subListen');
-INSERT INTO "settings" ("key", "value") VALUES ("webListen", '127.0.0.1');
-INSERT INTO "settings" ("key", "value") VALUES ("subEnable", 'false');
-DBEOF
-
-WEB_LISTEN=$(sqlite3 -list $XUIDB "SELECT value FROM settings WHERE key='webListen' LIMIT 1;")
-SUB_ENABLE=$(sqlite3 -list $XUIDB "SELECT value FROM settings WHERE key='subEnable' LIMIT 1;")
-SUB_PORT=$(sqlite3 -list $XUIDB "SELECT value FROM settings WHERE key='subPort' LIMIT 1;")
-
-DB_OK=true
-[ "$WEB_LISTEN" != "127.0.0.1" ] && echo "  webListen=$WEB_LISTEN (expected 127.0.0.1)" && DB_OK=false
-[ "$SUB_ENABLE" != "false" ] && echo "  subEnable=$SUB_ENABLE (expected false)" && DB_OK=false
-[ -n "$SUB_PORT" ] && echo "  subPort=$SUB_PORT (expected empty)" && DB_OK=false
-
-if [ "$DB_OK" = true ]; then
-    pass "DB settings (webListen 127.0.0.1, subEnable false) verified"
-else
-    fail "DB settings incorrect"
-fi
-echo ""
-
-# --- Test 14: RU-Block injection ---
-echo ">>> Test 14: RU-Block rule injection"
-
-# Create xrayTemplateConfig
-sqlite3 $XUIDB "DELETE FROM settings WHERE key='xrayTemplateConfig'; INSERT INTO settings (key, value) VALUES ('xrayTemplateConfig', '{\"routing\":{\"rules\":[]}}');"
-
-python3 - << 'PYEOF'
-import sqlite3
-import json
-import sys
-
-db_path = "/etc/x-ui/x-ui.db"
-try:
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM settings WHERE key = 'xrayTemplateConfig'")
-    row = cursor.fetchone()
-    if row and row[0]:
-        try:
-            config = json.loads(row[0])
-        except Exception:
-            config = {}
-    else:
-        config = {}
-
-    # 1. Outbounds
-    if "outbounds" not in config or not isinstance(config["outbounds"], list) or len(config["outbounds"]) == 0:
-        config["outbounds"] = [
-            {"protocol": "freedom", "tag": "direct", "settings": {"domainStrategy": "UseIP"}},
-            {"protocol": "blackhole", "tag": "blocked", "settings": {}}
-        ]
-
-    # 2. DNS & Hosts
-    if "dns" not in config or not isinstance(config["dns"], dict):
-        config["dns"] = {
-            "servers": ["https+local://1.1.1.1/dns-query", "1.1.1.1", "8.8.8.8", "localhost"],
-            "hosts": {"domain:googleapis.cn": "googleapis.com"}
-        }
-
-    # 3. Routing rules
-    user_rules = [
-        {"type": "field", "inboundTag": ["api"], "outboundTag": "api"},
-        {"type": "field", "enabled": True, "domain": ["ext:geosite_RU.dat:ru-blocked-all"], "ip": ["geoip:ru", "ext:geoip_IR.dat:ru"], "outboundTag": "blocked"},
-        {"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"},
-        {"type": "field", "protocol": ["bittorrent"], "outboundTag": "blocked"},
-        {"type": "field", "enabled": True, "port": "443", "network": "udp", "outboundTag": "blocked"}
-    ]
-
-    if "routing" not in config or not isinstance(config["routing"], dict):
-        config["routing"] = {}
-    config["routing"]["domainStrategy"] = "IPIfNonMatch"
-
-    current_rules = config["routing"].get("rules", [])
-    filtered_rules = [
-        r for r in current_rules
-        if not (
-            r.get("outboundTag") in ["block", "blocked"] and (
-                "geoip:ru" in r.get("ip", []) or
-                "ext:geosite_RU.dat:ru-blocked-all" in r.get("domain", []) or
-                "geosite:ru" in r.get("domain", []) or
-                "geosite:category-ru" in r.get("domain", []) or
-                "bittorrent" in r.get("protocol", []) or
-                (r.get("port") == "443" and r.get("network") == "udp") or
-                r.get("ip") == ["geoip:private"]
-            )
-        ) and not (r.get("inboundTag") == ["api"] and r.get("outboundTag") == "api")
-    ]
-    config["routing"]["rules"] = user_rules + filtered_rules
-
-    cursor.execute("UPDATE settings SET value = ? WHERE key = 'xrayTemplateConfig'", (json.dumps(config, indent=2),))
-    if cursor.rowcount == 0:
-        cursor.execute("INSERT INTO settings (key, value) VALUES ('xrayTemplateConfig', ?)", (json.dumps(config, indent=2),))
-    conn.commit()
-    conn.close()
-    print("OK")
-except Exception as e:
-    print(f"ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
-PYEOF
-
-if [ $? -eq 0 ]; then
-    # Verify RU-Block and template components
-    VERIFY_OUT=$(sqlite3 $XUIDB "SELECT value FROM settings WHERE key='xrayTemplateConfig';" | python3 -c "
-import json, sys
-config = json.load(sys.stdin)
-rules = config.get('routing', {}).get('rules', [])
-outbounds = [o.get('tag') for o in config.get('outbounds', [])]
-hosts = config.get('dns', {}).get('hosts', {})
-
-has_ru_rule = any(r.get('outboundTag') == 'blocked' and 'ext:geosite_RU.dat:ru-blocked-all' in r.get('domain', []) for r in rules)
-has_outbounds = 'direct' in outbounds and 'blocked' in outbounds
-has_hosts = 'domain:googleapis.cn' in hosts
-
-if has_ru_rule and has_outbounds and has_hosts:
-    print('VALID')
-else:
-    print(f'INVALID: ru={has_ru_rule} out={has_outbounds} hosts={has_hosts}')
-" 2>/dev/null)
-    if [ "$VERIFY_OUT" = "VALID" ]; then
-        pass "RU-Block rule, outbounds, and hosts correctly configured in template"
+run_behavior_test() {
+    local label="$1" check="$2" status
+    (
+        set -Eeuo pipefail
+        trap 'printf "Failed assertion at line %s (exit %s)\n" "$LINENO" "$?" >&2' ERR
+        "$check"
+    ) > "$QA_ROOT/$check.log" 2>&1
+    status=$?
+    if (( status == 0 )); then
+        pass "$label"
     else
-        fail "RU-Block template verification failed: $VERIFY_OUT"
+        cat "$QA_ROOT/$check.log"
+        fail "$label"
     fi
-else
-    fail "RU-Block injection failed"
-fi
-
-# Test idempotency - run again
-python3 - << 'PYEOF'
-import sqlite3
-import json
-db_path = "/etc/x-ui/x-ui.db"
-conn = sqlite3.connect(db_path)
-cursor = conn.cursor()
-cursor.execute("SELECT value FROM settings WHERE key = 'xrayTemplateConfig'")
-row = cursor.fetchone()
-config = json.loads(row[0])
-user_rules = [
-    {"type": "field", "inboundTag": ["api"], "outboundTag": "api"},
-    {"type": "field", "enabled": True, "domain": ["ext:geosite_RU.dat:ru-blocked-all"], "ip": ["geoip:ru", "ext:geoip_IR.dat:ru"], "outboundTag": "blocked"},
-    {"type": "field", "ip": ["geoip:private"], "outboundTag": "blocked"},
-    {"type": "field", "protocol": ["bittorrent"], "outboundTag": "blocked"},
-    {"type": "field", "enabled": True, "port": "443", "network": "udp", "outboundTag": "blocked"}
-]
-current_rules = config["routing"].get("rules", [])
-filtered_rules = [
-    r for r in current_rules
-    if not (
-        r.get("outboundTag") in ["block", "blocked"] and (
-            "geoip:ru" in r.get("ip", []) or
-            "ext:geosite_RU.dat:ru-blocked-all" in r.get("domain", []) or
-            "geosite:ru" in r.get("domain", []) or
-            "geosite:category-ru" in r.get("domain", []) or
-            "bittorrent" in r.get("protocol", []) or
-            (r.get("port") == "443" and r.get("network") == "udp") or
-            r.get("ip") == ["geoip:private"]
-        )
-    ) and not (r.get("inboundTag") == ["api"] and r.get("outboundTag") == "api")
-]
-config["routing"]["rules"] = user_rules + filtered_rules
-cursor.execute("UPDATE settings SET value = ? WHERE key = 'xrayTemplateConfig'", (json.dumps(config, indent=2),))
-conn.commit()
-conn.close()
-PYEOF
-
-RULE_COUNT=$(sqlite3 $XUIDB "SELECT value FROM settings WHERE key='xrayTemplateConfig';" | python3 -c "
-import json, sys
-config = json.load(sys.stdin)
-count = sum(1 for r in config.get('routing',{}).get('rules',[]) if r.get('outboundTag') == 'blocked' and 'ext:geosite_RU.dat:ru-blocked-all' in r.get('domain',[]))
-print(count)
-" 2>/dev/null)
-if [ "$RULE_COUNT" = "1" ]; then
-    pass "RU-Block idempotent (no duplicates after re-run)"
-else
-    fail "RU-Block duplicated after re-run (count=$RULE_COUNT)"
-fi
-echo ""
-
-# --- Test 15: Certbot renewal hook ---
-echo ">>> Test 15: Certbot renewal hook"
-mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh << 'HOOK'
-#!/bin/bash
-systemctl reload nginx
-HOOK
-chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
-
-if [ -x "/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh" ]; then
-    pass "Certbot renewal hook exists and is executable"
-else
-    fail "Certbot renewal hook missing or not executable"
-fi
-echo ""
-
-# --- Test 16: Sysctl config file and parameters ---
-echo ">>> Test 16: Sysctl parameters check"
-cat > /etc/sysctl.d/99-xui-tuning.conf << 'SYSCTL'
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-fs.file-max = 2097152
-net.ipv4.tcp_max_syn_backlog = 65535
-net.core.somaxconn = 65535
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.tcp_notsent_lowat = 16384
-SYSCTL
-
-if [ -f "/etc/sysctl.d/99-xui-tuning.conf" ] && \
-   grep -q "somaxconn = 65535" /script.sh && \
-   grep -q "udp_rmem_min = 16384" /script.sh && \
-   grep -q "tcp_notsent_lowat = 16384" /script.sh; then
-    pass "Sysctl parameters somaxconn=65535, udp_rmem_min=16384, tcp_notsent_lowat=16384 verified"
-else
-    fail "Sysctl parameters verification failed"
-fi
-echo ""
-
-# --- Test 17: Logrotate config ---
-echo ">>> Test 17: Logrotate config"
-cat > /etc/logrotate.d/xui-nginx << 'LOGR'
-/var/log/nginx/*.log {
-    daily
-    rotate 3
-    missingok
-    notifempty
-    compress
 }
-LOGR
 
-if [ -f "/etc/logrotate.d/xui-nginx" ]; then
-    pass "Logrotate config created"
-else
-    fail "Logrotate config missing"
+expect_failure() {
+    if "$@"; then
+        printf 'Expected a failure from %s\n' "$1" >&2
+        return 1
+    fi
+}
+
+test_deployment_lock() {
+    source "$QA_DEPLOYMENT"
+    STATE_DIR="$QA_ROOT/lock"
+    deployment_lock
+    expect_failure bash -eu -c 'source "$1"; STATE_DIR="$2"; deployment_lock' \
+        _ "$QA_DEPLOYMENT" "$STATE_DIR" 9>&-
+    exec 9>&-
+    bash -eu -c 'source "$1"; STATE_DIR="$2"; deployment_lock' \
+        _ "$QA_DEPLOYMENT" "$STATE_DIR"
+}
+
+test_deployment_rollback() {
+    source "$QA_DEPLOYMENT"
+    local fixture="$QA_ROOT/rollback" writer_pid
+    STATE_DIR="$fixture/state"
+    XUIDB="$fixture/db/x-ui.db"
+    mkdir -p "$fixture/db"
+
+    # Keep the SQLite writer open so the committed row stays in the WAL.
+    python3 - "$XUIDB" "$fixture" <<'PY' &
+from pathlib import Path
+import sqlite3
+import sys
+import time
+
+database, fixture = sys.argv[1:]
+connection = sqlite3.connect(database)
+connection.execute("PRAGMA journal_mode=WAL")
+connection.execute("PRAGMA wal_autocheckpoint=0")
+connection.execute("CREATE TABLE clients (name TEXT)")
+connection.execute("INSERT INTO clients VALUES ('existing-client')")
+connection.commit()
+Path(fixture, "ready").touch()
+for _ in range(200):
+    if Path(fixture, "release").exists():
+        break
+    time.sleep(0.05)
+connection.close()
+PY
+    writer_pid=$!
+    trap 'kill "$writer_pid" 2>/dev/null || true' EXIT
+    for _ in {1..100}; do
+        [[ -f "$fixture/ready" ]] && break
+        sleep 0.05
+    done
+    [[ -f "$fixture/ready" && -s "$XUIDB-wal" ]]
+
+    # Exercise real backups/restoration. The container has no systemd PID 1.
+    systemctl() {
+        case "$1" in
+            show) printf 'not-found\n' ;;
+            is-active|is-enabled) return 1 ;;
+            daemon-reload)
+                if [[ -f "$fixture/fail-rollback" ]]; then rm "$fixture/fail-rollback"; return 1; fi
+                return 0 ;;
+            *) return 2 ;;
+        esac
+    }
+    printf 'existing nginx\n' > "$fixture/nginx.conf"
+    ln -s nginx.conf "$fixture/linked.conf"
+    printf 'foreign nginx\n' > "$fixture/foreign.conf"
+    deployment_lock
+    deployment_begin "$fixture/nginx.conf" "$fixture/linked.conf" "$fixture/new.conf"
+    [[ "$(deployment_active)" == "$DEPLOYMENT" ]]
+    [[ "$(stat -c %a "$DEPLOYMENT/x-ui.db")" == 600 ]]
+    [[ "$(sqlite3 "$DEPLOYMENT/x-ui.db" 'SELECT name FROM clients')" == existing-client ]]
+    touch "$fixture/release"
+    wait "$writer_pid"
+    trap - EXIT
+
+    deployment_prepare_database
+    sqlite3 -bail "$XUIDB" "UPDATE clients SET name = 'broken'"
+    printf 'new nginx\n' > "$fixture/nginx.conf"
+    rm "$fixture/linked.conf"
+    printf 'new file\n' > "$fixture/new.conf"
+    deployment_rollback "$DEPLOYMENT"
+    [[ ! -e "$STATE_DIR/active" && ! -e "$fixture/new.conf" ]]
+    [[ "$(cat "$fixture/nginx.conf")" == 'existing nginx' ]]
+    [[ "$(readlink "$fixture/linked.conf")" == nginx.conf ]]
+    [[ "$(cat "$fixture/foreign.conf")" == 'foreign nginx' ]]
+    [[ "$(sqlite3 "$XUIDB" 'SELECT name FROM clients')" == existing-client ]]
+    [[ "$(sqlite3 "$XUIDB" 'PRAGMA integrity_check')" == ok ]]
+    deployment_begin "$fixture/nginx.conf"
+    deployment_prepare_database
+    sqlite3 -bail "$XUIDB" "UPDATE clients SET name = 'interrupted'"
+    touch "$fixture/fail-rollback"
+    expect_failure deployment_rollback "$DEPLOYMENT"
+    [[ -f "$STATE_DIR/active" && -f "$DEPLOYMENT/x-ui.db" ]]
+    [[ "$(sqlite3 "$DEPLOYMENT/x-ui.db" 'PRAGMA integrity_check')" == ok ]]
+    cp -- "$DEPLOYMENT/x-ui.db" "$fixture/good-snapshot"
+    printf 'corrupt snapshot\n' > "$DEPLOYMENT/x-ui.db"
+    expect_failure deployment_rollback "$DEPLOYMENT"
+    [[ -f "$STATE_DIR/active" ]]
+    [[ "$(sqlite3 "$XUIDB" 'SELECT name FROM clients')" == existing-client ]]
+    mv -- "$fixture/good-snapshot" "$DEPLOYMENT/x-ui.db"
+    deployment_rollback "$DEPLOYMENT"
+    [[ ! -f "$STATE_DIR/active" && "$(sqlite3 "$XUIDB" 'SELECT name FROM clients')" == existing-client ]]
+
+    # Model an inbound and a temporary outbound UDP socket of the same core.
+    # Requiring the outbound source port after restart makes recovery impossible.
+    local runtime=/usr/local/x-ui/bin/config.json
+    if [[ -f "$runtime" ]]; then cp -a "$runtime" "$fixture/runtime.original"; fi
+    trap 'if [[ -f "$QA_ROOT/rollback/runtime.original" ]]; then cp -a "$QA_ROOT/rollback/runtime.original" /usr/local/x-ui/bin/config.json; else rm -f /usr/local/x-ui/bin/config.json; fi' EXIT
+    printf '{"inbounds":[{"port":443}]}' > "$runtime"
+    ss() {
+        if [[ "$*" == *-lunp* ]]; then
+            printf '%s\n' \
+                'UNCONN 0 0 0.0.0.0:443 0.0.0.0:* users:(("xray",pid=1,fd=1))' \
+                'UNCONN 0 0 0.0.0.0:54121 0.0.0.0:* users:(("xray",pid=1,fd=2))'
+        fi
+    }
+    deployment_begin "$fixture/nginx.conf"
+    [[ "$(cat "$DEPLOYMENT/listeners")" == 'u 443 xray' ]]
+}
+
+test_preflight() {
+    local output before after state="$QA_ROOT/preflight"
+    local -a args=(-dry_run y -install n -subdomain vpn.qa.test \
+        -public_ip4 192.0.2.10 -ssh_port 22 -mask_upstream http://127.0.0.1:8000)
+    mkdir -p "$state"
+    cp /etc/hosts "$state/hosts.original"
+    trap 'cat "$QA_ROOT/preflight/hosts.original" > /etc/hosts; rm -f /etc/x-ui/x-ui.db /etc/nginx/conf.d/qa-foreign.conf' EXIT
+    printf '192.0.2.10 vpn.qa.test\n' >> /etc/hosts
+    printf '# foreign nginx configuration\n' > /etc/nginx/conf.d/qa-foreign.conf
+    rm -f /etc/x-ui/x-ui.db /etc/x-ui/x-ui.db-wal /etc/x-ui/x-ui.db-shm
+    XUI_DB_FOLDER=/etc/x-ui /usr/local/x-ui/x-ui migrate
+    before=$(sha256sum /etc/nginx/nginx.conf /etc/nginx/conf.d/qa-foreign.conf /etc/x-ui/x-ui.db)
+
+    output=$(bash "$QA_INSTALLER" "${args[@]}")
+    grep -Fq 'Preflight passed for vpn.qa.test' <<< "$output"
+    grep -Eq 'Legacy adoption token: [0-9a-f]{64}$' <<< "$output"
+    expect_failure bash "$QA_INSTALLER" "${args[@]}" -not-an-option y
+    expect_failure bash "$QA_INSTALLER" "${args[@]}" -mask_upstream 'http://127.0.0.1:8000; include /tmp/bad'
+    expect_failure bash "$QA_INSTALLER" "${args[@]}" -mask_upstream http://127.0.0.1:80
+    expect_failure bash "$QA_INSTALLER" "${args[@]}" -mask_upstream 'http://[::ffff:7f00:1]:80'
+    bash "$QA_INSTALLER" "${args[@]}" -mask_upstream http://127.0.0.1 -mask_port 8123 \
+        -xhttp_config_path /root/test-xhttp.json -xhttp_download_path /downloads/xhttp.json
+    expect_failure bash "$QA_INSTALLER" "${args[@]}" -mask_port 65536
+    expect_failure bash "$QA_INSTALLER" "${args[@]}" -mask_port 9443
+    expect_failure bash "$QA_INSTALLER" "${args[@]}" -xhttp_download_path '/x;bad'
+    expect_failure bash "$QA_INSTALLER" "${args[@]}" -xhttp_config_path /root/../etc/xhttp.json
+    expect_failure bash "$QA_INSTALLER" "${args[@]}" -xhttp_config_path /tmp/xhttp.json
+    after=$(sha256sum /etc/nginx/nginx.conf /etc/nginx/conf.d/qa-foreign.conf /etc/x-ui/x-ui.db)
+    [[ "$before" == "$after" && ! -e /var/lib/vpn-script ]]
+    mv /etc/x-ui/x-ui.db "$state/original.db"
+    ln -s "$state/original.db" /etc/x-ui/x-ui.db
+    expect_failure bash "$QA_INSTALLER" "${args[@]}"
+    [[ -L /etc/x-ui/x-ui.db ]]
+    rm -f /etc/x-ui/x-ui.db
+    cp "$state/original.db" /etc/x-ui/x-ui.db
+
+    # Preflight verifies installed panel version even in dry-run
+    cp /usr/local/x-ui/x-ui "$state/x-ui.orig"
+    cat > /usr/local/x-ui/x-ui <<'MOCK'
+#!/bin/sh
+echo "3x-ui 99.0.0"
+MOCK
+    chmod +x /usr/local/x-ui/x-ui
+    output=$(bash "$QA_INSTALLER" "${args[@]}" 2>&1 || true)
+    cp "$state/x-ui.orig" /usr/local/x-ui/x-ui
+    grep -Fq 'Installed panel is newer than the supported release' <<< "$output"
+}
+
+test_syntax_and_openssh() {
+    bash -n "$QA_INSTALLER" "$QA_DEPLOYMENT" "$(dirname "$QA_INSTALLER")/lib/ssh.sh"
+    install -d /run/sshd
+    printf 'Port 60022\n' > "$QA_ROOT/sshd.conf"
+    /usr/sbin/sshd -t -f "$QA_ROOT/sshd.conf"
+    printf 'Port 65536\n' > "$QA_ROOT/sshd.conf"
+    expect_failure /usr/sbin/sshd -t -f "$QA_ROOT/sshd.conf"
+}
+
+test_xray_routing_and_links() {
+    local fixture="$QA_ROOT/xray" xray_dir=/usr/local/x-ui/bin
+    mkdir -p "$fixture"
+    XUI_DB_FOLDER="$fixture" /usr/local/x-ui/x-ui migrate
+    XRAY_LOCATION_ASSET="$xray_dir" python3 - "$fixture" \
+        "$(dirname "$QA_INSTALLER")/lib/xray_config.py" "$xray_dir/xray-linux-$(dpkg --print-architecture)" <<'PY'
+import json
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlsplit
+
+fixture, helper, xray = sys.argv[1:]
+database = str(Path(fixture) / "x-ui.db")
+config_file = Path(fixture) / "config.json"
+with sqlite3.connect(database) as db:
+    for protocol, port, tag, settings, stream in (
+        ("vless", 24680, "test-vless", {"encryption": "none"}, {"network": "xhttp", "xhttpSettings": {
+            "path": "/qa/xhttp/", "mode": "stream-one", "xPaddingHeader": "X-Demo-Guard",
+            "xPaddingPlacement": "header",
+        }}),
+        ("hysteria", 443, "test-hy2", {"version": 2}, {"network": "hysteria", "tlsSettings": {
+            "serverName": "vpn.qa.test",
+        }}),
+    ):
+        db.execute("INSERT INTO inbounds (enable,protocol,port,tag,settings,stream_settings) VALUES (1,?,?,?,?,?)",
+                   (protocol, port, tag, json.dumps(settings), json.dumps(stream)))
+    db.execute("INSERT INTO clients (email,uuid,auth,enable,expiry_time) VALUES (?,?,?,?,?)",
+               ("vless-test", "11111111-1111-4111-8111-111111111111", "", 1, 0))
+    db.execute("INSERT INTO clients (email,uuid,auth,enable,expiry_time) VALUES (?,?,?,?,?)",
+               ("hy2-test", "", "qa:#%@ secret", 1, 0))
+    db.execute("INSERT INTO client_inbounds (client_id,inbound_id) VALUES (1,1),(2,2)")
+    db.commit()
+
+    def template():
+        [row] = db.execute("SELECT value FROM settings WHERE key='xrayTemplateConfig'").fetchall()
+        return json.loads(row[0])
+
+    def routing(ru, provider, expected=0):
+        proc = subprocess.run([sys.executable, helper, "routing", database, "24680", ru, provider, "n"],
+                              text=True, capture_output=True)
+        assert proc.returncode == expected, proc.stderr
+        return proc.stderr
+
+    for provider in ("none", "xboxdns", "geohide", "comss", "none"):
+        for ru in ("y", "n"):
+            routing(ru, provider)
+            config = template()
+            tags = {rule["ruleTag"] for rule in config["routing"]["rules"] if "ruleTag" in rule}
+            assert {"vpn-script:private", "vpn-script:direct"} <= tags
+            assert ("vpn-script:ru-domains" in tags) == (ru == "y")
+            assert ("vpn-script:ru-ip" in tags) == (ru == "y")
+            for rule in config["routing"]["rules"]:
+                if rule.get("ruleTag", "").startswith("vpn-script:ru-"):
+                    assert not ("domain" in rule and "ip" in rule)
+            servers = config.get("dns", {}).get("servers", [])
+            managed = [s for s in servers if isinstance(s, dict) and s.get("tag") == "vpn-script-doh"]
+            assert len(managed) == (provider != "none")
+            if managed:
+                assert managed[0]["domains"] and managed[0]["skipFallback"]
+                assert any(isinstance(server, str) for server in servers)
+            config_file.write_text(json.dumps(config))
+            subprocess.run([xray, "run", "-test", "-c", str(config_file)], check=True)
+            routing(ru, provider)
+            assert config == template()
+
+    config = template()
+    config["routing"]["rules"].append({"type": "field", "network": "tcp", "outboundTag": "direct"})
+    db.execute("UPDATE settings SET value=? WHERE key='xrayTemplateConfig'", (json.dumps(config),))
+    db.commit()
+    assert "custom Xray route" in routing("y", "none", expected=1)
+    assert config == template()
+
+links = subprocess.check_output([sys.executable, helper, "links", database, "vpn.qa.test", "24680"], text=True)
+vless, hy2 = map(urlsplit, links.splitlines())
+assert unquote(vless.username) == "11111111-1111-4111-8111-111111111111"
+vless_query = parse_qs(vless.query)
+assert vless_query["path"] == ["/qa/xhttp/"] and vless_query["mode"] == ["stream-one"]
+assert json.loads(vless_query["extra"][0])["xPaddingHeader"] == "X-Demo-Guard"
+assert unquote(hy2.username) == "qa:#%@ secret" and parse_qs(hy2.query)["sni"] == ["vpn.qa.test"]
+PY
+}
+
+test_audit_listener_failure() {
+    local audit="$(dirname "$QA_INSTALLER")/audit.sh" output
+    install -d -m 700 /var/lib/vpn-script "$QA_ROOT/mock-bin"
+    install -m 600 /dev/null /var/lib/vpn-script/config.json
+    printf '%s\n' '{"domain":"vpn.qa.test","panel_port":2096,"xhttp_port":31337,"hy2_port":443,"ssh_port":22,"dns_provider":"none","block_ru":"n"}' \
+        > /var/lib/vpn-script/config.json
+    cat > "$QA_ROOT/mock-bin/ss" <<'SH'
+#!/bin/sh
+if [ "${QA_SS_UNAVAILABLE:-0}" = 1 ]; then exit 2; fi
+if [ "$2" = '-ltnp' ]; then
+    printf '%s\n' 'LISTEN 0 128 0.0.0.0:2096 0.0.0.0:* users:(("x-ui",pid=42,fd=9))'
 fi
-echo ""
+SH
+    chmod 755 "$QA_ROOT/mock-bin/ss"
+    export PATH="$QA_ROOT/mock-bin:$PATH"
+    if output=$(bash "$audit" 2>&1); then
+        printf 'Audit succeeded despite an exposed panel and missing sockets\n' >&2
+        return 1
+    fi
+    grep -Fq 'FAIL 3X-UI on port 2096' <<< "$output"
+    grep -Fq 'FAIL VLESS xHTTP on port 31337' <<< "$output"
+    if output=$(QA_SS_UNAVAILABLE=1 bash "$audit" 2>&1); then
+        printf 'Audit succeeded despite unavailable socket status\n' >&2
+        return 1
+    fi
+    grep -Fq 'FAIL Cannot inspect TCP and UDP sockets' <<< "$output"
+}
 
-# --- Test 18: Script contains no geoip2 load_module ---
-echo ">>> Test 18: Script has no geoip2 load_module directive (only comment)"
-if grep -q "^grep.*ngx_stream_geoip2_module" /script.sh 2>/dev/null; then
-    fail "Active geoip2 load_module line still in script"
-else
-    pass "No active geoip2 load_module line in script"
-fi
-echo ""
+test_reality_contract() {
+    python3 "$(dirname "$QA_INSTALLER")/tests/reality-contract.py"
+}
 
-# --- Test 19: Script has -block_ru argument ---
-echo ">>> Test 19: Script has -block_ru argument"
-if grep -q "\-block_ru" /script.sh; then
-    pass "-block_ru argument present"
-else
-    fail "-block_ru argument missing"
-fi
-echo ""
+test_legacy_resource_recognition() {
+    source "$QA_DEPLOYMENT"
+    local fixture="$QA_ROOT/legacy-test"
+    domain="vpn.qa.test"
+    mkdir -p "$fixture/jail.d" "$fixture/nginx.service.d" "$fixture/stream-enabled"
 
-# --- Test 20: Script has -mode argument ---
-echo ">>> Test 20: Script has -mode argument"
-if grep -q "\-mode)" /script.sh; then
-    pass "-mode argument present"
-else
-    fail "-mode argument missing"
-fi
-echo ""
+    # 1. fail2ban with iptables-allports
+    local f2b="/etc/fail2ban/jail.d/99-sshd.local"
+    install -d -m 755 /etc/fail2ban/jail.d
+    trap 'rm -f /etc/fail2ban/jail.d/99-sshd.local /etc/systemd/system/nginx.service.d/vpn-script.conf /etc/nginx/stream-enabled/stream.conf' EXIT
+    printf 'banaction = iptables-allports\nfindtime  = 600\n' > "$f2b"
+    legacy_resource "$f2b"
+    printf 'banaction = ufw\nfindtime  = 600\n' > "$f2b"
+    legacy_resource "$f2b"
 
-# --- Test 21: UFW rules in script ---
-echo ">>> Test 21: UFW default deny incoming in script"
-if grep -q "ufw default deny incoming" /script.sh; then
-    pass "ufw default deny incoming present"
-else
-    fail "ufw default deny incoming missing"
-fi
-echo ""
+    # 2. systemd drop-in with vpn-script.conf
+    local dropin="/etc/systemd/system/nginx.service.d/vpn-script.conf"
+    install -d -m 755 /etc/systemd/system/nginx.service.d
+    printf '[Service]\nLimitNOFILE=65535' > "$dropin"
+    legacy_resource "$dropin"
 
-# --- Test 22: ln -sf in script (no bare ln -s) ---
-echo ">>> Test 22: All symlinks use ln -sf"
-# Check that sites-enabled symlinks use -sf
-if grep "ln -s " /script.sh | grep -v "ln -sf" | grep -v "^#" | grep -q "sites-enabled\|cert"; then
-    fail "Found bare 'ln -s' without -sf for cert/sites-enabled"
-else
-    pass "All cert/sites-enabled symlinks use ln -sf"
-fi
-echo ""
+    # 3. stream.conf with upstream www
+    local stream_conf="/etc/nginx/stream-enabled/stream.conf"
+    install -d -m 755 /etc/nginx/stream-enabled
+    printf 'upstream www { server 127.0.0.1:80; }\nproxy_pass /dev/shm/nginx-http.sock;\n' > "$stream_conf"
+    legacy_resource "$stream_conf"
+}
 
-# --- Test 23: upgrade_xray_core function exists ---
-echo ">>> Test 23: upgrade_xray_core function exists"
-if grep -q "upgrade_xray_core()" /script.sh; then
-    pass "upgrade_xray_core function defined"
-else
-    fail "upgrade_xray_core function missing"
-fi
-echo ""
+test_ssh_socket_listener_check() {
+    source "$QA_DEPLOYMENT"
+    ss() {
+        printf '%s\n' 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("systemd",pid=1,fd=42))'
+    }
+    expect_failure check_listener 22 t available sshd
+    check_listener 22 t available "sshd|systemd"
+    ss() { return 1; }
+    expect_failure check_listener 22 t available sshd
+    ss() {
+        printf '%s\n' 'LISTEN 0 128 127.0.0.1:12345 0.0.0.0:* users:(("xray-foreign",pid=1,fd=42))'
+    }
+    expect_failure check_listener 12345 t loopback xray
+    ss() {
+        printf '%s\n' 'LISTEN 0 128 127.0.0.1:12345 0.0.0.0:* users:(("xray-linux-amd6",pid=1,fd=42))'
+    }
+    check_listener 12345 t loopback xray
+}
 
-# --- Test 24: apply_ru_block function exists ---
-echo ">>> Test 24: apply_ru_block function exists"
-if grep -q "apply_ru_block()" /script.sh; then
-    pass "apply_ru_block function defined"
-else
-    fail "apply_ru_block function missing"
-fi
-echo ""
+test_startup_interrupted_rollback_reporting() {
+    local fixture="$QA_ROOT/startup-rollback" output
+    mkdir -p "$fixture/state/transaction.qa12345/files"
+    printf 'transaction.qa12345\n' > "$fixture/state/active"
+    printf 'corrupt-sqlite' > "$fixture/state/transaction.qa12345/x-ui.db"
+    touch "$fixture/state/transaction.qa12345/database-write"
+    touch "$fixture/state/transaction.qa12345/paths"
+    touch "$fixture/state/transaction.qa12345/services"
+    output=$(STATE_DIR="$fixture/state" bash "$QA_INSTALLER" -install n -mask_upstream http://127.0.0.1:8000 -subdomain vpn.qa.test 2>&1 || true)
+    grep -Fq "Rollback incomplete. Recovery data: $fixture/state/transaction.qa12345" <<< "$output"
+}
 
-# --- Test 25: XHTTP inbound uses stream-one, vlessenc, and vision ---
-echo ">>> Test 25: XHTTP inbound uses stream-one, vlessenc, and vision"
-if grep -q "stream-one" /script.sh && grep -q "vlessenc" /script.sh && grep -q "xtls-rprx-vision" /script.sh; then
-    pass "XHTTP inbound uses stream-one, vlessenc, and xtls-rprx-vision"
-else
-    fail "XHTTP inbound missing stream-one, vlessenc, or xtls-rprx-vision"
-fi
-echo ""
+test_xhttp_migration_no_empty_headers() {
+    local fixture="$QA_ROOT/xhttp-headers"
+    local db="$fixture/x-ui.db"
+    mkdir -p "$fixture"
+    python3 - "$db" <<'PY'
+import json, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("CREATE TABLE inbounds (id INTEGER PRIMARY KEY, protocol TEXT, enable INTEGER, port INTEGER, stream_settings TEXT, settings TEXT, listen TEXT)")
+conn.execute("CREATE TABLE settings (key TEXT, value TEXT)")
+conn.execute("INSERT INTO inbounds VALUES (1, 'vless', 1, 12345, ?, '{}', '0.0.0.0')",
+             (json.dumps({"network": "xhttp", "xhttpSettings": {"path": "/old/path/"}}),))
+conn.execute("INSERT INTO inbounds VALUES (2, 'hysteria', 1, 443, ?, ?, '0.0.0.0')",
+             (json.dumps({"network": "hysteria", "tlsSettings": {}, "hysteriaSettings": {}}),
+              json.dumps({"version": 2})))
+conn.commit()
+PY
 
-# --- Test 26: Monoprotocol xHTTP inbound in script.sh and absence of WS/Trojan ---
-echo ">>> Test 26: Monoprotocol xHTTP inbound in script.sh and absence of WS/Trojan"
-XHTTP_COUNT=$(grep -A15 "emoji_flag.*xhttp" /script.sh | grep -c "'127.0.0.1'" 2>/dev/null || true)
-WS_INBOUND_COUNT=$(grep -c "emoji_flag.*ws" /script.sh 2>/dev/null || true)
-TROJAN_INBOUND_COUNT=$(grep -c "emoji_flag.*trojan" /script.sh 2>/dev/null || true)
-XHTTP_COUNT=${XHTTP_COUNT:-0}
-WS_INBOUND_COUNT=${WS_INBOUND_COUNT:-0}
-TROJAN_INBOUND_COUNT=${TROJAN_INBOUND_COUNT:-0}
-if [ "$XHTTP_COUNT" -ge 1 ] && [ "$WS_INBOUND_COUNT" -eq 0 ] && [ "$TROJAN_INBOUND_COUNT" -eq 0 ]; then
-    pass "Monoprotocol xHTTP inbound present (127.0.0.1), WS and Trojan inbounds completely absent"
-else
-    fail "Inbounds check failed: xHTTP=$XHTTP_COUNT, WS=$WS_INBOUND_COUNT, Trojan=$TROJAN_INBOUND_COUNT"
-fi
-echo ""
+    python3 - "$db" "12345" "/new/path/" "" "" "" "" "vpn.qa.test" "/tmp" "http://127.0.0.1:8000" <<'PYTHON'
+import json, sqlite3, sys
+db, port, path, pad_key, pad_header, session_key, seq_key, domain, cert_dir, mask = sys.argv[1:]
+with sqlite3.connect(db) as conn:
+    conn.execute("BEGIN IMMEDIATE")
+    vless, = conn.execute(
+        "SELECT id, stream_settings FROM inbounds WHERE protocol='vless' AND enable=1 "
+        "AND port=? AND json_extract(stream_settings,'$.network')='xhttp'", (port,)
+    ).fetchall()
+    vless_stream = json.loads(vless[1])
+    xhttp = vless_stream["xhttpSettings"]
+    xhttp["path"] = path
+    for name, value in (
+        ("xPaddingKey", pad_key), ("xPaddingHeader", pad_header),
+        ("sessionIDKey", session_key), ("seqKey", seq_key)
+    ):
+        if value:
+            xhttp[name] = value
+        elif name in xhttp and not xhttp[name]:
+            xhttp.pop(name, None)
+    conn.execute("UPDATE inbounds SET listen='127.0.0.1', stream_settings=? WHERE id=?",
+                 (json.dumps(vless_stream), vless[0]))
+PYTHON
 
-# --- Test 27: Fake site fallback exists ---
-echo ">>> Test 27: Fake site fallback HTML"
-if grep -q "Service Operational" /script.sh; then
-    pass "Fake site fallback HTML present"
-else
-    fail "Fake site fallback HTML missing"
-fi
-echo ""
+    python3 - "$db" <<'PY'
+import json, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+stream = json.loads(conn.execute("SELECT stream_settings FROM inbounds WHERE id=1").fetchone()[0])
+xhttp = stream["xhttpSettings"]
+assert xhttp["path"] == "/new/path/"
+for key in ("xPaddingKey", "xPaddingHeader", "sessionIDKey", "seqKey"):
+    assert key not in xhttp or xhttp[key] != "", f"Empty key {key} present in xhttpSettings"
+PY
+}
 
-# --- Test 28: sub2sing-box, clash templates, and subpage removed ---
-echo ">>> Test 28: Sub2sing-box, Clash, and Subpage removal verification"
-TEST28_FAIL=0
-if grep -q "install_sub2sing-box" /script.sh || grep -q "sub2sing-box" /script.sh; then
-    echo "ERROR: sub2sing-box reference still present in script.sh"
-    TEST28_FAIL=1
-fi
-if grep -q "URL_CLASH_SUB" /script.sh || grep -q "clash.yaml" /script.sh; then
-    echo "ERROR: clash templates still present"
-    TEST28_FAIL=1
-fi
-if grep -q "URL_SUB_PAGE" /script.sh || grep -q 'mkdir -p "\$DEST_DIR_SUB_PAGE"' /script.sh; then
-    echo "ERROR: subpage generator still present"
-    TEST28_FAIL=1
-fi
-if grep -q "sub2singbox_path" /script.sh; then
-    echo "ERROR: sub2singbox_path variable still present"
-    TEST28_FAIL=1
-fi
-if grep -q "web_path" /script.sh; then
-    echo "ERROR: web_path variable still present"
-    TEST28_FAIL=1
-fi
-if grep -F 'proxy_pass http://127.0.0.1:8080/;' /script.sh; then
-    echo "ERROR: 8080 proxy_pass still present"
-    TEST28_FAIL=1
-fi
-if [ $TEST28_FAIL -eq 0 ]; then
-    pass "sub2sing-box, clash, and subpage completely removed"
-else
-    fail "Residual sub2sing-box/clash/subpage code found in script.sh"
-fi
-echo ""
+test_credentials_preservation_on_repeat() {
+    local fixture="$QA_ROOT/creds-test"
+    mkdir -p "$fixture/state" "$fixture/deployment/files"
+    local state_dir="$fixture/state"
+    local deployment="$fixture/deployment"
+    local xuidb="$fixture/x-ui.db"
+    python3 - "$xuidb" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password TEXT)")
+conn.execute("INSERT INTO users VALUES (1, 'myuser', 'hash')")
+conn.commit()
+PY
+    printf 'Panel URL: https://vpn.test/secret/\nUsername: myuser\nPassword: mysecretpassword\nvless://...\n' \
+        > "$state_dir/credentials"
+    chmod 600 "$state_dir/credentials"
 
-# --- Test 29: Early system utilities installation check ---
-echo ">>> Test 29: System utilities installation at script startup"
-if grep -q "install_dependencies()" /script.sh && \
-   grep -q "netcat-openbsd" /script.sh && \
-   grep -q "psmisc" /script.sh && \
-   grep -q "install_dependencies" /script.sh; then
-    pass "All required utilities installed at script startup"
-else
-    fail "Missing install_dependencies or required packages in script.sh"
-fi
-echo ""
+    local config_username="" config_password="" domain="vpn.test" panel_path="secret" links="vless://mock"
+    (
+        STATE_DIR="$state_dir"
+        DEPLOYMENT="$deployment"
+        XUIDB="$xuidb"
+        if [[ -z "$config_password" ]]; then
+            creds_source=""
+            if [[ -f "$STATE_DIR/credentials" ]]; then
+                creds_source="$STATE_DIR/credentials"
+            elif [[ -d "$DEPLOYMENT/files" && -f "$DEPLOYMENT/paths" ]]; then
+                creds_idx=$(awk -v target="$STATE_DIR/credentials" '$0 == target { print NR - 1 }' "$DEPLOYMENT/paths")
+                if [[ -n "$creds_idx" && -f "$DEPLOYMENT/files/$creds_idx" ]]; then
+                    creds_source="$DEPLOYMENT/files/$creds_idx"
+                fi
+            fi
+            if [[ -n "$creds_source" ]]; then
+                saved_user=$(sed -n -E 's/^Username:[[:space:]]*(.*)$/\1/p' "$creds_source" | head -n1 || true)
+                saved_pass=$(sed -n -E 's/^Password:[[:space:]]*(.*)$/\1/p' "$creds_source" | head -n1 || true)
+                db_user=$(sqlite3 -batch -bail -readonly "$XUIDB" 'SELECT username FROM users ORDER BY id LIMIT 1;' 2>/dev/null || true)
+                if [[ -n "$saved_user" && -n "$saved_pass" && -n "$db_user" && "$saved_user" == "$db_user" ]]; then
+                    config_username="$saved_user"
+                    config_password="$saved_pass"
+                fi
+            fi
+        fi
+        install -m 600 /dev/null "$STATE_DIR/credentials.new"
+        {
+            printf 'Panel URL: https://%s/%s/\n' "$domain" "$panel_path"
+            if [[ -n "$config_password" ]]; then
+                printf 'Username: %s\nPassword: %s\n' "$config_username" "$config_password"
+            fi
+            printf '%s\n' "$links"
+        } > "$STATE_DIR/credentials.new"
+        mv -f -- "$STATE_DIR/credentials.new" "$STATE_DIR/credentials"
+    )
 
-# --- Test 30: Absence of SSRF arbitrary port forwarding in script ---
-echo ">>> Test 30: SSRF regex location removed"
-if grep -q "fwdport" /script.sh; then
-    fail "SSRF regex location with fwdport still present in script.sh"
-else
-    pass "SSRF arbitrary port forward location removed"
-fi
-echo ""
+    grep -Fxq 'Username: myuser' "$state_dir/credentials"
+    grep -Fxq 'Password: mysecretpassword' "$state_dir/credentials"
+    [[ "$(stat -c %a "$state_dir/credentials")" == 600 ]]
+}
 
-# --- Test 31: HTTPS bound strictly to unix domain socket ---
-echo ">>> Test 31: HTTPS bound strictly to unix domain socket"
-if grep -q "listen unix:/dev/shm/nginx-http.sock" /script.sh; then
-    pass "HTTPS bound strictly to unix domain socket"
-else
-    fail "listen unix:/dev/shm/nginx-http.sock not bound in /script.sh"
-fi
-echo ""
-
-# --- Test 32: validate_domain is called on domain input ---
-echo ">>> Test 32: validate_domain invocation check"
-if grep -q "validate_domain \"\$domain\"" /script.sh; then
-    pass "validate_domain is actively invoked"
-else
-    fail "validate_domain is not called in script.sh"
-fi
-echo ""
-
-# --- Test 33: Certbot renewal uses webroot and nginx reload ---
-echo ">>> Test 33: Certbot renewal configuration"
-if grep -q "certbot renew --webroot" /script.sh; then
-    pass "Certbot renew configured with webroot"
-else
-    fail "Certbot renew not using webroot"
-fi
-echo ""
-
-# --- Test 34: Verify ANTILOOP_PORT and listen 127.0.0.1:9443 ssl ---
-echo ">>> Test 34: Verify ANTILOOP_PORT and listen 127.0.0.1:9443 ssl in script"
-if grep -q "ANTILOOP_PORT=9443" /script.sh && \
-   (grep -q 'listen 127.0.0.1:\${ANTILOOP_PORT} ssl' /script.sh || grep -q "listen 127.0.0.1:9443 ssl" /script.sh); then
-    pass "ANTILOOP_PORT and anti-loop listen verified in /script.sh"
-else
-    fail "ANTILOOP_PORT or anti-loop listen missing in /script.sh"
-fi
-echo ""
-
-# --- Test 35: Verify dns_preflight_check ---
-echo ">>> Test 35: Verify dns_preflight_check in script"
-if grep -q "dns_preflight_check" /script.sh; then
-    pass "dns_preflight_check verified in /script.sh"
-else
-    fail "dns_preflight_check missing in /script.sh"
-fi
-echo ""
-
-# --- Test 36: Verify setup_nginx_mainline_repo ---
-echo ">>> Test 36: Verify setup_nginx_mainline_repo in script"
-if grep -q "setup_nginx_mainline_repo" /script.sh; then
-    pass "setup_nginx_mainline_repo verified in /script.sh"
-else
-    fail "setup_nginx_mainline_repo missing in /script.sh"
-fi
-echo ""
-
-# --- Test 37: Verify reality_failover upstream with backup ---
-echo ">>> Test 37: Verify reality_failover upstream with backup in script"
-if grep -q "upstream reality_failover" /script.sh && \
-   grep -A5 "upstream reality_failover" /script.sh | grep -q "backup"; then
-    pass "reality_failover upstream with backup verified in /script.sh"
-else
-    fail "reality_failover upstream with backup missing in /script.sh"
-fi
-echo ""
-
-# --- Test 38: Verify ssl_reject_handshake on; and default_server ---
-echo ">>> Test 38: Verify ssl_reject_handshake on; and default_server in script"
-if grep -q "ssl_reject_handshake on;" /script.sh && \
-   grep -q "default_server" /script.sh; then
-    pass "ssl_reject_handshake on and default_server verified in /script.sh"
-else
-    fail "ssl_reject_handshake on or default_server missing in /script.sh"
-fi
-echo ""
-
-# --- Test 39: Verify node mode security (UFW, sysctl, webListen 127.0.0.1) ---
-echo ">>> Test 39: Verify node mode security (UFW, sysctl, webListen 127.0.0.1) in script"
-NODE_BLOCK=$(sed -n '/if \[\[ "\${MODE}" == "node" \]\]; then/,/exit 0/p' /script.sh)
-if echo "$NODE_BLOCK" | grep -q "ufw default deny incoming" && \
-   echo "$NODE_BLOCK" | grep -q "apply_sysctl_tuning" && \
-   echo "$NODE_BLOCK" | grep -q "'webListen', '127.0.0.1'"; then
-    pass "Node mode security (UFW, sysctl, webListen 127.0.0.1) verified in /script.sh"
-else
-    fail "Node mode security missing required controls in /script.sh"
-fi
-echo ""
-
-# --- Test 40: Verify file permissions (chmod 700 /etc/x-ui and chmod 600 /etc/x-ui/x-ui.db*) ---
-echo ">>> Test 40: Verify file permissions (chmod 700 /etc/x-ui and chmod 600 /etc/x-ui/x-ui.db*) in script"
-if grep -q "chmod 700 /etc/x-ui" /script.sh && \
-   grep -q "chmod 600 /etc/x-ui/x-ui.db" /script.sh; then
-    pass "Strict file permissions chmod 700 and chmod 600 verified in /script.sh"
-else
-    fail "Strict file permissions chmod 700 or chmod 600 missing in /script.sh"
-fi
-echo ""
-
-# --- Test 41: Verify install_panel does not start x-ui prematurely ---
-echo ">>> Test 41: Verify install_panel does not start x-ui prematurely"
-INSTALL_PANEL_FUNC=$(sed -n '/^install_panel() {/,/^}/p' /script.sh)
-if ! echo "$INSTALL_PANEL_FUNC" | grep -qE "systemctl[[:space:]]+(start|restart)[[:space:]]+x-ui" && \
-   echo "$INSTALL_PANEL_FUNC" | grep -q "systemctl enable x-ui"; then
-    pass "install_panel enables service without premature start"
-else
-    fail "install_panel contains premature start/restart of x-ui"
-fi
-echo ""
-
-# --- Test 42: Fail2ban filter and jail syntax validation ---
-echo ">>> Test 42: Fail2ban filter and jail syntax validation"
-mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d /var/log/nginx
-touch /var/log/nginx/probe.log /var/log/auth.log
-chmod 640 /var/log/nginx/probe.log
-
-cat > /etc/fail2ban/filter.d/nginx-probe.conf << 'EOF'
-[Definition]
-failregex = ^<HOST> -.* "(GET|POST|HEAD|PUT|DELETE|CONNECT|OPTIONS).*" (400|401|403|404|429|444) .*
-ignoreregex =
-EOF
-
-cat > /etc/fail2ban/jail.d/99-nginx-probe.local << 'EOF'
-[nginx-probe]
-enabled   = true
-port      = http,https
-filter    = nginx-probe
-logpath   = /var/log/nginx/probe.log
-maxretry  = 5
-findtime  = 60
-bantime   = 86400
-banaction = ufw
-EOF
-
-if fail2ban-client -t 2>&1; then
-    pass "Fail2ban configuration syntax is valid (fail2ban-client -t)"
-else
-    fail "Fail2ban configuration syntax error"
-fi
-echo ""
-
-# --- Test 43: Direct Client Connection URI check in script.sh ---
-echo ">>> Test 43: Direct Client Connection URI check in script.sh"
-if grep -q "CLIENT_VLESS_URL=" /script.sh && \
-   grep -q "Direct Client Connection (VLESS-xHTTP):" /script.sh && \
-   ! grep -q "Native Subscription:" /script.sh; then
-    pass "Direct Client Connection URI present and subscription links removed"
-else
-    fail "Direct Client Connection URI missing or subscriptions still present"
-fi
-echo ""
-
-# --- Test 44: Nginx rate limiting and probe logging in script.sh ---
-echo ">>> Test 44: Nginx rate limiting and probe logging in script.sh"
-if grep -q "limit_req_zone" /script.sh && \
-   grep -q "probe_security.conf" /script.sh && \
-   grep -q "probe.log" /script.sh; then
-    pass "Nginx rate limiting and probe.log directives verified in script.sh"
-else
-    fail "Nginx rate limiting or probe.log directives missing in script.sh"
-fi
-echo ""
-
-# --- Test 45: TCP Fast Open in sysctl ---
-echo ">>> Test 45: TCP Fast Open in sysctl"
-if grep -q "net\.ipv4\.tcp_fastopen = 3" /script.sh; then
-    pass "TCP Fast Open (net.ipv4.tcp_fastopen = 3) verified in script.sh sysctl template"
-else
-    fail "TCP Fast Open (net.ipv4.tcp_fastopen = 3) missing in script.sh"
-fi
-echo ""
-
-# --- Test 46: SSH hardening and -ssh_port argument ---
-echo ">>> Test 46: SSH hardening and -ssh_port argument"
-if grep -q "\-ssh_port)" /script.sh && \
-   grep -q "setup_ssh_port" /script.sh && \
-   grep -q "99-custom-port\.conf" /script.sh; then
-    pass "SSH hardening logic, -ssh_port arg, and drop-in config verified in script.sh"
-else
-    fail "SSH hardening or -ssh_port argument missing in script.sh"
-fi
-echo ""
-
-# --- Test 47: Fail2ban SSH jail configuration and fail2ban-client -t validation ---
-echo ">>> Test 47: Fail2ban SSH jail configuration and fail2ban-client -t validation"
-touch /var/log/auth.log
-chmod 640 /var/log/auth.log
-cat > /etc/fail2ban/jail.d/99-sshd.local << 'EOF'
-[sshd]
-enabled   = true
-port      = 60022
-filter    = sshd
-logpath   = /var/log/auth.log
-maxretry  = 3
-findtime  = 600
-bantime   = 86400
-banaction = ufw
-EOF
-
-if fail2ban-client -t 2>&1; then
-    pass "Fail2ban sshd jail syntax is valid (fail2ban-client -t)"
-else
-    fail "Fail2ban sshd jail syntax validation failed"
-fi
-echo ""
-
-# --- Test 48: Unattended upgrades configuration in script.sh ---
-echo ">>> Test 48: Unattended upgrades configuration in script.sh"
-if grep -q "setup_unattended_upgrades" /script.sh && \
-   grep -q "20auto-upgrades" /script.sh && \
-   grep -q "50unattended-upgrades" /script.sh && \
-   grep -q "Automatic-Reboot \"false\"" /script.sh; then
-    pass "Unattended upgrades configuration verified in script.sh"
-else
-    fail "Unattended upgrades configuration missing in script.sh"
-fi
-echo ""
-
-# --- Test 49: Hysteria 2 inbound SQLite schema and parameters ---
-echo ">>> Test 49: Hysteria 2 inbound SQLite schema and parameters"
-TEST_DB="/tmp/test_hy2_schema.db"
-rm -f "$TEST_DB"
-sqlite3 "$TEST_DB" << 'EOF'
-CREATE TABLE inbounds (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    up INTEGER NOT NULL DEFAULT 0,
-    down INTEGER NOT NULL DEFAULT 0,
-    total INTEGER NOT NULL DEFAULT 0,
-    remark TEXT NOT NULL,
-    enable INTEGER NOT NULL DEFAULT 1,
-    expiry_time INTEGER NOT NULL DEFAULT 0,
-    listen TEXT NOT NULL,
-    port INTEGER NOT NULL,
-    protocol TEXT NOT NULL,
-    settings TEXT NOT NULL,
-    stream_settings TEXT NOT NULL,
-    tag TEXT NOT NULL,
-    sniffing TEXT NOT NULL
-);
-CREATE TABLE client_traffics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    inbound_id INTEGER NOT NULL,
-    enable INTEGER NOT NULL DEFAULT 1,
-    email TEXT NOT NULL,
-    up INTEGER NOT NULL DEFAULT 0,
-    down INTEGER NOT NULL DEFAULT 0,
-    expiry_time INTEGER NOT NULL DEFAULT 0,
-    total INTEGER NOT NULL DEFAULT 0,
-    reset INTEGER NOT NULL DEFAULT 0
-);
-EOF
-
-HY2_SQL=$(sed -n '/firstHy2/,$p' /script.sh | sed -n '1,/EOF/p' | sed '$d')
-sqlite3 "$TEST_DB" <<< "$HY2_SQL" 2>/dev/null || true
-
-HY2_COUNT=$(sqlite3 "$TEST_DB" "SELECT count(*) FROM inbounds WHERE protocol='hysteria' AND port=443;" 2>/dev/null || echo 0)
-HY2_MASQ=$(sqlite3 "$TEST_DB" "SELECT json_extract(stream_settings, '$.hysteriaSettings.masquerade.url') FROM inbounds WHERE protocol='hysteria';" 2>/dev/null || true)
-HY2_ALPN=$(sqlite3 "$TEST_DB" "SELECT json_extract(stream_settings, '$.tlsSettings.alpn[0]') FROM inbounds WHERE protocol='hysteria';" 2>/dev/null || true)
-HY2_TRAFFIC=$(sqlite3 "$TEST_DB" "SELECT count(*) FROM client_traffics WHERE email='firstHy2';" 2>/dev/null || echo 0)
-
-if [ "$HY2_COUNT" -eq 1 ] && [ "$HY2_MASQ" = "http://127.0.0.1:80" ] && [ "$HY2_ALPN" = "h3" ] && [ "$HY2_TRAFFIC" -eq 1 ]; then
-    pass "Hysteria 2 inbound schema, masquerade proxy, ALPN h3, and client traffic verified in SQLite"
-else
-    fail "Hysteria 2 SQLite verification failed: count=$HY2_COUNT, masq=$HY2_MASQ, alpn=$HY2_ALPN, traffic=$HY2_TRAFFIC"
-fi
-rm -f "$TEST_DB"
-echo ""
-
-# --- Test 50: Hysteria 2 direct client connection URI and summary ---
-echo ">>> Test 50: Hysteria 2 direct client connection URI and summary"
-if grep -q "CLIENT_HY2_URL=" /script.sh && \
-   grep -q "Direct Client Connection (Hysteria 2 UDP Backup):" /script.sh && \
-   grep -q "hysteria2://" /script.sh; then
-    pass "Hysteria 2 client URI (CLIENT_HY2_URL) and display section verified in script.sh"
-else
-    fail "Hysteria 2 client URI or summary display missing in script.sh"
-fi
-echo ""
-
-# --- Test 51: UFW firewall rules for UDP 443 and hardened SSH ---
-echo ">>> Test 51: UFW firewall rules for UDP 443 and hardened SSH"
-if grep -q "ufw allow 443/udp" /script.sh && \
-   grep -q "ufw allow \"\${SSH_PORT:-22}/tcp\"" /script.sh; then
-    pass "UFW 443/udp and dynamic SSH port rules verified in script.sh"
-else
-    fail "UFW 443/udp or dynamic SSH port rules missing in script.sh"
-fi
-echo ""
+run_behavior_test "Deployment lock rejects concurrent writes and releases cleanly" test_deployment_lock
+run_behavior_test "Rollback restores WAL-backed SQLite, original files and symlinks" test_deployment_rollback
+run_behavior_test "Installer and helper syntax, real sshd config validation" test_syntax_and_openssh
+run_behavior_test "Preflight detects adoption and rejects invalid upstream without writing" test_preflight
+run_behavior_test "Xray validates provider transitions, independent RU rules, and actual client exports" test_xray_routing_and_links
+run_behavior_test "Audit fails for exposed or missing sockets and unavailable ss" test_audit_listener_failure
+run_behavior_test "REALITY additive migration preserves identities, counters and keys" test_reality_contract
+run_behavior_test "Legacy resource recognizes iptables-allports, vpn-script drop-ins, and legacy stream" test_legacy_resource_recognition
+run_behavior_test "SSH listener check accepts ssh.socket systemd listeners" test_ssh_socket_listener_check
+run_behavior_test "Interrupted rollback failure reports incomplete recovery data on startup" test_startup_interrupted_rollback_reporting
+run_behavior_test "xHTTP inbound migration prevents writing empty header keys" test_xhttp_migration_no_empty_headers
+run_behavior_test "Credentials file preserves existing Username and Password on repeat deploy" test_credentials_preservation_on_repeat
 
 # --- Summary ---
 echo ""
 echo "=============================================="
-echo "  TEST RESULTS: ${PASS} passed, ${FAIL} failed, ${TOTAL} total"
+echo "  TEST RESULTS: ${PASS} passed, ${FAIL} failed, $((PASS + FAIL)) total"
 echo "=============================================="
 
 if [ $FAIL -gt 0 ]; then
