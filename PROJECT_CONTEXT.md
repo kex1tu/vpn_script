@@ -35,7 +35,7 @@ DNS-профили: `none` (по умолчанию при чистой уста
 | [lib/](lib/) | Этапы развёртывания и восстановления, SSH, артефакты, генерация и проверка конфигураций |
 | [audit.sh](audit.sh) | Диагностика действующего узла |
 | [Dockerfile.test](Dockerfile.test) | Контейнерный образ с закреплёнными компонентами |
-| [test_script.sh](test_script.sh) | Базовые группы поведенческих проверок |
+| [test_script.sh](test_script.sh) | Базовый сьют поведенческих проверок (12 сценариев) |
 | [tests/](tests/) | Матрица ОС, миграции, реальные клиенты, SSH/systemd, отказы и fixtures |
 | [interactive_test.sh](interactive_test.sh), [run_interactive.sh](run_interactive.sh) | Интерактивный контейнерный стенд |
 | [AGENTS.md](AGENTS.md) | Единственный регламент работы агента и безопасности разработки |
